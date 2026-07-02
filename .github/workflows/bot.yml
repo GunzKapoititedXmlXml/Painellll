@@ -1071,7 +1071,7 @@ jobs:
           
           # Start Cloudflare Tunnel
           echo "Starting Cloudflare Tunnel..."
-          ./cloudflared tunnel run --token eyJhIjoiY2FkNjFhM2UyYzk5Y2NiN2IwNTQ2MmU0MWY1N2JjNTYiLCJ0IjoiZjE5ZGViYTItYTI2My00YTExLWE1YjktYTRlNGE1MzA4NTJlIiwicyI6Ik1tVXlZak01TlRrdE16SmtNUzAwWXpOaExUbGpOamN0WVdWbFlUVTFaR0V4TVdRNSJ9 &
+          ./cloudflared tunnel run --token eyJhIjoiY2FkNjFhM2UyYzk5Y2NiN2IwNTQ2MmU0MWY1N2JjNTYiLCJ0IjoiYzEzYWY4ZTUtY2RlMC00MmRhLWFiNzUtODk1MWY5MGE4YTY4IiwicyI6Ill6UmpaVEk1TnpBdFlXUTNOaTAwTURJNUxXSXdZalF0TjJJNU9ETTJPVEF3WWpJeCJ9 &
           TUNNEL_PID=$!
           echo $TUNNEL_PID > ~/tunnel_pid.txt
           
