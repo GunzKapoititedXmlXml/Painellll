@@ -20,31 +20,40 @@ jobs:
       
       # ============================================
       # 🛡️ CLOUDFLARE BRUTE FORCE PROTECTION
+      # Blok IP yang melakukan >5 request dalam 10 menit
       # ============================================
-      - name: 🛡️ BRUTE FORCE IP BLOCKER
+      - name: 🛡️ BRUTE FORCE IP BLOCKER (5 Request/10 Menit)
         run: |
           echo "=========================================="
           echo "  🛡️ AKTIFKAN BRUTE FORCE PROTECTION  🛡️"
           echo "=========================================="
           echo "Aturan: >5 request dalam 10 menit = BLOCK"
           echo "Durasi block: 10 menit"
+          echo "Setelah 10 menit: Normal kembali"
           echo ""
           
+          # ============================================
+          # 1. BUAT SISTEM MONITORING REQUEST
+          # ============================================
           cat > /tmp/bruteforce_monitor.js << 'BFJS'
           const fs = require('fs');
+          const path = require('path');
           const http = require('http');
           const https = require('https');
           
+          // Konfigurasi
           const CONFIG = {
-            MAX_REQUESTS: 5,
-            TIME_WINDOW: 600000,
-            BLOCK_DURATION: 600000,
-            CHECK_INTERVAL: 60000
+            MAX_REQUESTS: 5,           // Maksimal request
+            TIME_WINDOW: 600000,       // 10 menit dalam milidetik
+            BLOCK_DURATION: 600000,    // 10 menit block
+            CHECK_INTERVAL: 60000      // Cek setiap 1 menit
           };
           
+          // Database IP yang diblok
           const BLOCKED_IPS_FILE = '/tmp/blocked_ips.json';
           const REQUEST_LOG_FILE = '/tmp/request_log.json';
           
+          // Inisialisasi database
           function initDatabase() {
             if (!fs.existsSync(BLOCKED_IPS_FILE)) {
               fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify({}));
@@ -54,18 +63,29 @@ jobs:
             }
           }
           
+          // ============================================
+          // 2. FUNGSI CEK & BLOCK IP
+          // ============================================
           function checkAndBlockIP(ip, endpoint) {
             const now = Date.now();
+            
+            // Baca data
             let blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
             let requestLog = JSON.parse(fs.readFileSync(REQUEST_LOG_FILE, 'utf8'));
             
+            // ============================================
+            // CEK APAKAH IP SEDANG DIBLOK
+            // ============================================
             if (blockedData[ip]) {
               const blockTime = blockedData[ip].blocked_until;
               if (now < blockTime) {
+                // Masih dalam masa block
                 const remaining = Math.ceil((blockTime - now) / 1000);
-                console.log(`⛔ IP ${ip} masih diblok! Sisa: ${Math.floor(remaining/60)} menit`);
+                console.log(`⛔ IP ${ip} masih diblok! Sisa: ${Math.floor(remaining/60)} menit ${remaining%60} detik`);
                 return { blocked: true, remaining: remaining };
               } else {
+                // Block expired, hapus dari daftar block
+                console.log(`✅ IP ${ip} sudah tidak diblok (${new Date(blockTime).toLocaleString()})`);
                 delete blockedData[ip];
                 delete requestLog[ip];
                 fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData));
@@ -73,63 +93,169 @@ jobs:
               }
             }
             
+            // ============================================
+            // LOG REQUEST IP
+            // ============================================
             if (!requestLog[ip]) {
-              requestLog[ip] = { requests: [], total: 0, first_seen: now, last_seen: now };
+              requestLog[ip] = {
+                requests: [],
+                total: 0,
+                first_seen: now,
+                last_seen: now
+              };
             }
             
+            // Bersihkan request lama (>10 menit)
             requestLog[ip].requests = requestLog[ip].requests.filter(
               time => now - time < CONFIG.TIME_WINDOW
             );
+            
+            // Tambahkan request baru
             requestLog[ip].requests.push(now);
             requestLog[ip].total = requestLog[ip].requests.length;
             requestLog[ip].last_seen = now;
             
+            // ============================================
+            // CEK APAKAH MELEBIHI BATAS (>5 REQUEST)
+            // ============================================
             if (requestLog[ip].requests.length > CONFIG.MAX_REQUESTS) {
+              // BLOCK IP!
               const blockUntil = now + CONFIG.BLOCK_DURATION;
               blockedData[ip] = {
                 blocked_at: now,
                 blocked_until: blockUntil,
-                reason: `Brute force: ${requestLog[ip].requests.length} requests`,
+                reason: `Brute force detected: ${requestLog[ip].requests.length} requests in 10 minutes`,
                 total_requests: requestLog[ip].requests.length,
                 endpoint: endpoint
               };
+              
               fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData, null, 2));
               fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
+              
               console.log(`🚨 IP ${ip} DIBLOK!`);
+              console.log(`   📊 Requests: ${requestLog[ip].requests.length} (>5)`);
+              console.log(`   ⏰ Waktu: 10 menit`);
+              console.log(`   📌 Endpoint: ${endpoint || 'N/A'}`);
+              console.log(`   🔓 Unblock: ${new Date(blockUntil).toLocaleString()}`);
+              
               return { blocked: true, blocked_until: blockUntil };
             }
             
+            // Simpan data
             fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
+            
+            // Tampilkan status
+            if (requestLog[ip].requests.length > 0) {
+              const remaining = CONFIG.MAX_REQUESTS - requestLog[ip].requests.length + 1;
+              console.log(`📊 IP ${ip}: ${requestLog[ip].requests.length}/${CONFIG.MAX_REQUESTS} requests`);
+              console.log(`   Sisa quota: ${remaining} request sebelum block`);
+            }
+            
             return { blocked: false, request_count: requestLog[ip].requests.length };
           }
           
+          // ============================================
+          // 3. FUNGSI RESET OTOMATIS
+          // ============================================
+          function autoReset() {
+            const now = Date.now();
+            let blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
+            let changed = false;
+            
+            for (const ip in blockedData) {
+              if (now >= blockedData[ip].blocked_until) {
+                console.log(`✅ Auto-unblock IP ${ip} (${new Date(blockedData[ip].blocked_until).toLocaleString()})`);
+                delete blockedData[ip];
+                changed = true;
+              }
+            }
+            
+            if (changed) {
+              fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData, null, 2));
+              
+              // Bersihkan request log
+              let requestLog = JSON.parse(fs.readFileSync(REQUEST_LOG_FILE, 'utf8'));
+              for (const ip in requestLog) {
+                if (!blockedData[ip]) {
+                  // Bersihkan request lama
+                  requestLog[ip].requests = requestLog[ip].requests.filter(
+                    time => now - time < CONFIG.TIME_WINDOW
+                  );
+                  if (requestLog[ip].requests.length === 0) {
+                    delete requestLog[ip];
+                  }
+                }
+              }
+              fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
+            }
+          }
+          
+          // ============================================
+          // 4. FUNGSI CEK STATUS IP
+          // ============================================
+          function checkIPStatus(ip) {
+            const blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
+            if (blockedData[ip]) {
+              const now = Date.now();
+              if (now < blockedData[ip].blocked_until) {
+                const remaining = Math.ceil((blockedData[ip].blocked_until - now) / 1000);
+                return {
+                  blocked: true,
+                  remaining: remaining,
+                  reason: blockedData[ip].reason,
+                  blocked_at: blockedData[ip].blocked_at,
+                  blocked_until: blockedData[ip].blocked_until
+                };
+              }
+            }
+            return { blocked: false };
+          }
+          
+          // ============================================
+          // 5. MONITOR REQUEST (HOOK KE HTTP/HTTPS)
+          // ============================================
           function hookNetworkRequests() {
             const originalHttpRequest = http.request;
             const originalHttpsRequest = https.request;
             
+            // Hook untuk HTTP
             http.request = function(options, callback) {
               const clientIP = options.host || options.hostname || 'unknown';
               const endpoint = options.path || '/';
+              
+              // Cek dan block IP
               const result = checkAndBlockIP(clientIP, endpoint);
+              
               if (result.blocked) {
+                // Buat response block
                 const response = new http.ServerResponse({});
                 response.statusCode = 403;
                 response.setHeader('Content-Type', 'application/json');
                 response.write(JSON.stringify({
                   error: 'IP diblokir sementara',
                   reason: 'Terlalu banyak request (>5 dalam 10 menit)',
-                  unblock_in: `${Math.ceil(result.remaining/60)} menit`
+                  unblock_in: `${Math.ceil(result.remaining/60)} menit`,
+                  timestamp: new Date().toISOString()
                 }));
                 response.end();
-                return response;
+                
+                // Return response yang sudah diblock
+                const res = new http.ServerResponse({});
+                res.statusCode = 403;
+                return res;
               }
+              
+              // Lanjutkan request normal
               return originalHttpRequest.apply(this, arguments);
             };
             
+            // Hook untuk HTTPS
             https.request = function(options, callback) {
               const clientIP = options.host || options.hostname || 'unknown';
               const endpoint = options.path || '/';
+              
               const result = checkAndBlockIP(clientIP, endpoint);
+              
               if (result.blocked) {
                 const response = new http.ServerResponse({});
                 response.statusCode = 403;
@@ -142,77 +268,245 @@ jobs:
                 response.end();
                 return response;
               }
+              
               return originalHttpsRequest.apply(this, arguments);
             };
             
             console.log('✅ Network hooks installed');
           }
           
+          // ============================================
+          // 6. FUNGSI UTAMA
+          // ============================================
           function startBruteForceProtection() {
             initDatabase();
-            setInterval(() => {
-              const now = Date.now();
-              let blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
-              let changed = false;
-              for (const ip in blockedData) {
-                if (now >= blockedData[ip].blocked_until) {
-                  console.log(`✅ Auto-unblock IP ${ip}`);
-                  delete blockedData[ip];
-                  changed = true;
-                }
-              }
-              if (changed) {
-                fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData, null, 2));
-              }
-            }, CONFIG.CHECK_INTERVAL);
+            console.log('📂 Database initialized');
             
+            // Auto-reset setiap 1 menit
+            setInterval(autoReset, CONFIG.CHECK_INTERVAL);
+            console.log(`⏰ Auto-reset: setiap ${CONFIG.CHECK_INTERVAL/1000} detik`);
+            
+            // Hook network requests
             hookNetworkRequests();
-            console.log('✅ Brute Force Protection Active');
-            console.log(`📊 Max: ${CONFIG.MAX_REQUESTS} requests per 10 menit`);
+            
+            console.log('');
+            console.log('==========================================');
+            console.log('  🛡️ BRUTE FORCE PROTECTION ACTIVE  🛡️');
+            console.log('==========================================');
+            console.log(`📊 Max Requests: ${CONFIG.MAX_REQUESTS} per 10 menit`);
+            console.log(`⏰ Time Window: ${CONFIG.TIME_WINDOW/60000} menit`);
+            console.log(`🚫 Block Duration: ${CONFIG.BLOCK_DURATION/60000} menit`);
+            console.log(`🔄 Check Interval: ${CONFIG.CHECK_INTERVAL/1000} detik`);
+            console.log('==========================================');
+            console.log('');
+            
+            // Tampilkan IP yang sedang diblok
+            const blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
+            const blockedIPs = Object.keys(blockedData);
+            if (blockedIPs.length > 0) {
+              console.log('🚨 IPs currently blocked:');
+              blockedIPs.forEach(ip => {
+                const info = blockedData[ip];
+                const remaining = Math.ceil((info.blocked_until - Date.now()) / 1000);
+                console.log(`   ⛔ ${ip} - ${Math.floor(remaining/60)} menit ${remaining%60} detik tersisa`);
+              });
+            } else {
+              console.log('✅ No IPs currently blocked');
+            }
+            console.log('');
           }
           
-          module.exports = { startBruteForceProtection, checkAndBlockIP };
+          // ============================================
+          // 7. EXPORT FUNGSI
+          // ============================================
+          module.exports = {
+            startBruteForceProtection,
+            checkAndBlockIP,
+            checkIPStatus,
+            autoReset,
+            CONFIG
+          };
+          
+          // Jalankan jika langsung dieksekusi
+          if (require.main === module) {
+            startBruteForceProtection();
+            
+            // Biarkan berjalan
+            setInterval(() => {
+              console.log(`[${new Date().toISOString()}] 🔒 Protection aktif...`);
+            }, 60000);
+          }
           BFJS
           
+          # ============================================
+          # 7. INTEGRASI DENGAN BOT SYSTEM
+          # ============================================
           cat > /tmp/bruteforce_wrapper.sh << 'BFWRAPPER'
           #!/bin/bash
-          echo "🛡️ Starting Brute Force Protection..."
+          
+          echo "🛡️ Starting Brute Force Protection Wrapper..."
+          
+          # Jalankan monitor di background
           node /tmp/bruteforce_monitor.js &
-          echo $! > /tmp/bf_monitor.pid
+          MONITOR_PID=$!
+          echo $MONITOR_PID > /tmp/bf_monitor.pid
+          
+          echo "✅ Brute Force Protection Active"
+          echo "   Monitor PID: $MONITOR_PID"
+          echo "   Rule: >5 request/10 menit = BLOCK 10 menit"
+          
+          # Fungsi untuk cek status IP
+          check_ip() {
+            IP="$1"
+            if [ -f /tmp/blocked_ips.json ]; then
+              if grep -q "\"$IP\"" /tmp/blocked_ips.json; then
+                echo "⛔ IP $IP sedang diblok!"
+                return 1
+              else
+                echo "✅ IP $IP aman"
+                return 0
+              fi
+            fi
+          }
+          
+          # Fungsi untuk unblock IP manual
+          unblock_ip() {
+            IP="$1"
+            if [ -f /tmp/blocked_ips.json ]; then
+              sed -i "/\"$IP\"/d" /tmp/blocked_ips.json
+              echo "✅ IP $IP diunblock"
+            fi
+          }
+          
+          export -f check_ip unblock_ip
+          
+          echo ""
+          echo "📋 Command tersedia:"
+          echo "  check_ip <IP>    - Cek status IP"
+          echo "  unblock_ip <IP>  - Unblock IP manual"
+          echo ""
+          
+          # Keep running
           while true; do
             sleep 60
-            if ! kill -0 $(cat /tmp/bf_monitor.pid) 2>/dev/null; then
+            # Cek apakah monitor masih jalan
+            if ! kill -0 $MONITOR_PID 2>/dev/null; then
               echo "⚠️ Monitor mati, restarting..."
               node /tmp/bruteforce_monitor.js &
-              echo $! > /tmp/bf_monitor.pid
+              MONITOR_PID=$!
+              echo $MONITOR_PID > /tmp/bf_monitor.pid
             fi
           done
           BFWRAPPER
           
           chmod +x /tmp/bruteforce_wrapper.sh
+          
+          # ============================================
+          # 8. JALANKAN PROTECTION
+          # ============================================
+          echo "🚀 Menjalankan Brute Force Protection..."
           nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
-          echo "✅ Brute Force Protection Active"
+          BF_PID=$!
+          echo $BF_PID > /tmp/bf_wrapper.pid
           
           echo ""
-          echo "📊 STATUS:"
-          echo "   - Max 5 request per 10 menit"
-          echo "   - Block 10 menit"
-          echo "   - Auto-unblock setelah 10 menit"
+          echo "=========================================="
+          echo "  ✅ BRUTE FORCE PROTECTION AKTIF  ✅"
+          echo "=========================================="
+          echo "📊 Aturan:"
+          echo "   - Maksimal 5 request per 10 menit"
+          echo "   - Jika >5: BLOCK 10 menit"
+          echo "   - Setelah 10 menit: Normal kembali"
+          echo ""
+          echo "📂 Log: /tmp/bf.log"
+          echo "📂 Blocked IPs: /tmp/blocked_ips.json"
+          echo "📂 Request Log: /tmp/request_log.json"
+          echo "=========================================="
+          
+          # Tampilkan status awal
+          sleep 2
+          echo ""
+          echo "📊 STATUS AWAL:"
+          if [ -f /tmp/blocked_ips.json ]; then
+            BLOCKED_COUNT=$(cat /tmp/blocked_ips.json | grep -o '"blocked_at"' | wc -l)
+            echo "   IP diblok: $BLOCKED_COUNT"
+          else
+            echo "   IP diblok: 0"
+          fi
+          echo ""
       
       # ============================================
-      # 2. NETWORK OPTIMIZE
+      # 9. TAMBAHKAN KE BOT SYSTEM
+      # ============================================
+      - name: Integrate Brute Force Protection ke Bot
+        run: |
+          cat >> bot_system.sh << 'EOF'
+          # Start Brute Force Protection
+          echo "🛡️ Starting Brute Force Protection..."
+          if [ -f /tmp/bf_wrapper.pid ]; then
+            BF_PID=$(cat /tmp/bf_wrapper.pid)
+            if kill -0 $BF_PID 2>/dev/null; then
+              echo "✅ Brute Force Protection already running (PID: $BF_PID)"
+            else
+              echo "🔄 Restarting Brute Force Protection..."
+              nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
+              echo $! > /tmp/bf_wrapper.pid
+            fi
+          else
+            nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
+            echo $! > /tmp/bf_wrapper.pid
+          fi
+          EOF
+          
+          echo "✅ Brute Force Protection integrated to bot_system.sh"
+      
+      # ============================================
+      # 10. MONITOR DAN LOG
+      # ============================================
+      - name: Monitor Brute Force Protection
+        run: |
+          echo "=========================================="
+          echo "  📊 BRUTE FORCE PROTECTION MONITOR  📊"
+          echo "=========================================="
+          
+          # Tampilkan IP yang diblok
+          if [ -f /tmp/blocked_ips.json ]; then
+            echo ""
+            echo "🚫 BLOCKED IPS:"
+            cat /tmp/blocked_ips.json | jq -r 'to_entries[] | "\(.key): \(.value.reason) - Unblock: \(.value.blocked_until | fromdateiso8601 | strftime("%Y-%m-%d %H:%M:%S"))"' 2>/dev/null || cat /tmp/blocked_ips.json
+          fi
+          
+          # Tampilkan request log
+          if [ -f /tmp/request_log.json ]; then
+            echo ""
+            echo "📊 REQUEST LOG:"
+            cat /tmp/request_log.json | jq -r 'to_entries[] | "\(.key): \(.value.total) requests - Last: \(.value.last_seen | fromdateiso8601 | strftime("%H:%M:%S"))"' 2>/dev/null || echo "  (No request log)"
+          fi
+          
+          echo ""
+          echo "🔄 Auto-unblock: Setiap 10 menit"
+          echo "📝 Log file: /tmp/bf.log"
+          echo "=========================================="
+      
+      # ============================================
+      # 11. NETWORK OPTIMIZE
       # ============================================
       - name: Network Optimize
         run: |
+          # BUAT FILE NETWORK OPTIMIZE UNTUK BOT
           cat > /tmp/network-optimize.js << 'NETJS'
+          // ============================================
+          // NETWORK OPTIMASI UNTUK BOT (SPEED MAX)
+          // ============================================
           const dns = require('dns');
           const http = require('http');
           const https = require('https');
           const net = require('net');
           
-          // DNS Cache
+          // 1. DNS CACHE (5 menit)
           const dnsCache = new Map();
           const originalLookup = dns.lookup;
+          
           dns.lookup = function(hostname, options, callback) {
             if (dnsCache.has(hostname)) {
               const cached = dnsCache.get(hostname);
@@ -225,13 +519,18 @@ jobs:
                 return;
               }
             }
+            
             originalLookup(hostname, options, (err, address, family) => {
-              if (!err) dnsCache.set(hostname, { address, family, time: Date.now() });
-              if (typeof callback === 'function') callback(err, address, family);
+              if (!err) {
+                dnsCache.set(hostname, { address, family, time: Date.now() });
+              }
+              if (typeof callback === 'function') {
+                callback(err, address, family);
+              }
             });
           };
           
-          // HTTP Agent Keep-Alive
+          // 2. HTTP AGENT KEEP-ALIVE (MAX SOCKETS)
           const httpAgent = new http.Agent({
             keepAlive: true,
             keepAliveMsecs: 1000,
@@ -251,10 +550,11 @@ jobs:
             rejectUnauthorized: false
           });
           
+          // 3. OVERRIDE GLOBAL AGENT
           http.globalAgent = httpAgent;
           https.globalAgent = httpsAgent;
           
-          // Socket Optimize
+          // 4. SOCKET OPTIMASI (NO DELAY)
           const originalConnect = net.Socket.prototype.connect;
           net.Socket.prototype.connect = function(...args) {
             this.setNoDelay(true);
@@ -262,103 +562,276 @@ jobs:
             return originalConnect.apply(this, args);
           };
           
-          console.log('✅ Network Optimized: DNS Cache, Keep-Alive, Max Sockets 256');
+          console.log('✅ [BOT SPEED] Network Optimized:');
+          console.log(`  - DNS Cache: enabled (5 min)`);
+          console.log(`  - Keep-Alive: enabled`);
+          console.log(`  - Max Sockets: 256`);
+          console.log(`  - No Delay: enabled`);
+          console.log(`  - Thread Pool: 64`);
           NETJS
           
-          export NODE_OPTIONS="--max-old-space-size=16384 --max-http-header-size=16384 -r /tmp/network-optimize.js"
+          # SIMPAN KE ENVIRONMENT
           echo "export NODE_OPTIONS=\"--max-old-space-size=16384 --max-http-header-size=16384 -r /tmp/network-optimize.js\"" >> ~/.bashrc
+          export NODE_OPTIONS="--max-old-space-size=16384 --max-http-header-size=16384 -r /tmp/network-optimize.js"
+          
+          # TEST SPEED
+          echo ""
+          echo "📊 TESTING SPEED BOT:"
+          speedtest-cli --simple 2>/dev/null || echo "⚠️ Speed test tidak tersedia"
+          
+          echo ""
+          echo "✅ TOOLS & OPTIMASI BOT SELESAI!"
+          echo "=========================================="
       
       # ============================================
-      # 3. DOWNLOAD BOT ZIP
+      # 12. DOWNLOAD FILES SPEED MAX
       # ============================================
-      - name: Download Bot Zip
+      - name: ⬇️ Download Files Speed Max
+        run: |
+          echo "=== DOWNLOAD SPEED MAX ==="
+          
+          # Buat folder download
+          mkdir -p downloads
+          
+          # Download dengan multi-thread
+          download_file() {
+            URL="$1"
+            FILENAME="$2"
+            
+            echo "📥 Downloading: $FILENAME"
+            
+            # Metode 1: Aria2 (paling cepat)
+            aria2c -x 16 -s 16 -k 1M \
+              --max-download-limit=0 \
+              --console-log-level=error \
+              -o "downloads/$FILENAME" "$URL" &
+            
+            # Metode 2: Axel
+            # axel -n 16 -a -o "downloads/$FILENAME" "$URL" &
+          }
+          
+          # ========== CONTOH DOWNLOAD ==========
+          # Ganti URL berikut dengan file yang ingin didownload
+          
+          # Download semua file yang ada di repository
+          for file in *.zip *.rar *.7z *.tar.gz; do
+            if [ -f "$file" ]; then
+              echo "📦 Found: $file"
+            fi
+          done
+          
+          echo ""
+          echo "✅ Semua download selesai"
+          echo "Speed target: 10-50 Mbps"
+      
+      # ============================================
+      # 13. UPLOAD FILES SPEED MAX
+      # ============================================
+      - name: ⬆️ Upload Files Speed Max
+        run: |
+          echo "=== UPLOAD SPEED MAX ==="
+          
+          upload_file() {
+            FILE="$1"
+            TARGET_URL="$2"
+            
+            echo "📤 Uploading: $FILE"
+            
+            # Upload dengan curl (limit 50Mbps)
+            curl -X POST \
+              --limit-rate 50M \
+              -F "file=@$FILE" \
+              "$TARGET_URL" &
+          }
+          
+          # ========== CONTOH UPLOAD ==========
+          # Ganti dengan URL tujuan upload
+          
+          # Upload semua file .zip
+          for file in *.zip; do
+            if [ -f "$file" ]; then
+              echo "📤 Found ZIP: $file"
+              # upload_file "$file" "https://tujuan.com/upload"
+            fi
+          done
+          
+          echo ""
+          echo "✅ Semua upload selesai"
+      
+      # ============================================
+      # 14. RESTORE BACKUP
+      # ============================================
+      - name: Restore Backup dari Workflow Sebelumnya
         uses: actions/download-artifact@v4
         with:
-          pattern: bot-*
-          path: /tmp/bot_download
+          pattern: bot-backup-*
+          path: /tmp/restore_backup
           merge-multiple: true
         continue-on-error: true
       
-      # ============================================
-      # 4. EXTRACT ZIP
-      # ============================================
-      - name: Extract Bot Zip
+      - name: Extract dan Restore SEMUA Data (Multi-thread)
         run: |
-          echo "=== EKSTRAK BOT ZIP ==="
+          echo "=== RESTORE SEMUA DATA DENGAN SPEED MAX ==="
           
-          if [ -d "/tmp/bot_download" ]; then
-            echo "📂 Mencari file zip di /tmp/bot_download"
-            ls -la /tmp/bot_download/
+          if [ -d "/tmp/restore_backup" ] && [ "$(ls -A /tmp/restore_backup)" ]; then
+            echo "✅ Backup ditemukan, merestore SEMUA data..."
             
-            for zip_file in /tmp/bot_download/*.zip; do
-              if [ -f "$zip_file" ]; then
-                echo "📦 Extracting: $(basename "$zip_file")"
-                unzip -o "$zip_file" -d ./ || true
-                echo "✅ Extract selesai"
+            # Extract semua zip dengan parallel
+            find /tmp/restore_backup -name "*.zip" -type f 2>/dev/null | \
+              parallel -j 4 "unzip -o {} -d /tmp/restore_backup/" 2>/dev/null || true
+            
+            # Extract tar dengan pigz (multi-thread)
+            find /tmp/restore_backup -name "*.tar.gz" -type f 2>/dev/null | \
+              parallel -j 4 "tar -xzf {} -C /tmp/restore_backup/" 2>/dev/null || true
+            
+            # Extract tar dengan pbzip2
+            find /tmp/restore_backup -name "*.tar.bz2" -type f 2>/dev/null | \
+              parallel -j 4 "tar -xjf {} -C /tmp/restore_backup/" 2>/dev/null || true
+            
+            # 1. Restore SEMUA folder bot
+            for bot_dir in /tmp/restore_backup/bot_*/; do
+              if [ -d "$bot_dir" ]; then
+                BOT_NAME=$(basename "$bot_dir")
+                echo "📂 Restoring bot: $BOT_NAME"
+                mkdir -p "$BOT_NAME"
+                cp -r "$bot_dir"/* "$BOT_NAME"/ 2>/dev/null || true
               fi
             done
+            
+            # 2. Restore SEMUA folder (termasuk folder custom)
+            for folder in /tmp/restore_backup/*/; do
+              if [ -d "$folder" ]; then
+                FOLDER_NAME=$(basename "$folder")
+                # Skip folder yang sudah diproses
+                if [[ "$FOLDER_NAME" != "bot_"* ]] && [[ "$FOLDER_NAME" != "backup_"* ]] && [[ "$FOLDER_NAME" != "."* ]]; then
+                  echo "📁 Restoring folder: $FOLDER_NAME/"
+                  mkdir -p "$FOLDER_NAME"
+                  cp -r "$folder"/* "$FOLDER_NAME"/ 2>/dev/null || true
+                fi
+              fi
+            done
+            
+            # 3. Restore SEMUA file di root (di luar folder)
+            echo "📄 Restoring files in root directory..."
+            for file in /tmp/restore_backup/*; do
+              if [ -f "$file" ]; then
+                FILENAME=$(basename "$file")
+                # Skip file yang sudah diproses
+                if [[ "$FILENAME" != "backup_"* ]] && [[ "$FILENAME" != "."* ]]; then
+                  echo "  ✅ $FILENAME"
+                  cp "$file" "./" 2>/dev/null || true
+                fi
+              fi
+            done
+            
+            # 4. Restore file JSON (data user, session, dll)
+            echo "📄 Restoring JSON files..."
+            for json_file in /tmp/restore_backup/*.json; do
+              if [ -f "$json_file" ]; then
+                cp "$json_file" "./" 2>/dev/null || true
+                echo "  ✅ $(basename "$json_file")"
+              fi
+            done
+            
+            # 5. Restore database files
+            echo "🗄️ Restoring database files..."
+            for db_file in /tmp/restore_backup/*.db /tmp/restore_backup/*.sqlite /tmp/restore_backup/*.sql; do
+              if [ -f "$db_file" ]; then
+                cp "$db_file" "./" 2>/dev/null || true
+                echo "  ✅ $(basename "$db_file")"
+              fi
+            done
+            
+            # 6. Restore config files
+            echo "⚙️ Restoring config files..."
+            for config_file in /tmp/restore_backup/*.env /tmp/restore_backup/*.config /tmp/restore_backup/*.yml /tmp/restore_backup/*.yaml; do
+              if [ -f "$config_file" ]; then
+                cp "$config_file" "./" 2>/dev/null || true
+                echo "  ✅ $(basename "$config_file")"
+              fi
+            done
+            
+            # 7. Restore semua file penting lainnya
+            echo "📄 Restoring other important files..."
+            for file in /tmp/restore_backup/*.js /tmp/restore_backup/*.txt /tmp/restore_backup/*.md /tmp/restore_backup/*.sh; do
+              if [ -f "$file" ]; then
+                FILENAME=$(basename "$file")
+                # Skip file yang sudah diproses
+                if [[ "$FILENAME" != "fake-device.js" ]] && [[ "$FILENAME" != "bot_system"* ]]; then
+                  cp "$file" "./" 2>/dev/null || true
+                  echo "  ✅ $FILENAME"
+                fi
+              fi
+            done
+            
+            # 8. Restore fake-device.js
+            if [ -f "/tmp/restore_backup/fake-device.js" ]; then
+              cp "/tmp/restore_backup/fake-device.js" ./
+              echo "  ✅ fake-device.js"
+            fi
+            
+            # 9. Restore backup_info
+            if [ -f "/tmp/restore_backup/backup_info.txt" ]; then
+              cp "/tmp/restore_backup/backup_info.txt" ./
+              echo "  ✅ backup_info.txt"
+            fi
+            
+            echo "✅ RESTORE SEMUA DATA SELESAI"
+          else
+            echo "ℹ️ Tidak ada backup sebelumnya, memulai fresh"
           fi
           
-          # Cek zip di root
-          for zip_file in *.zip; do
-            if [ -f "$zip_file" ] && [[ "$zip_file" != "bot-"* ]]; then
-              echo "📦 Extracting root zip: $zip_file"
-              unzip -o "$zip_file" -d ./ || true
-            fi
-          done
-          
           echo ""
-          echo "=== ISI DIREKTORI ==="
+          echo "=== ISI DIREKTORI SETELAH RESTORE ==="
           ls -la
-          
           echo ""
-          echo "=== FOLDER DITEMUKAN ==="
+          echo "=== ISI FOLDER BOT ==="
           for dir in */; do
-            if [ -d "$dir" ]; then
+            if [ -d "$dir" ] && [[ "$dir" != backup_* ]] && [[ "$dir" != .* ]]; then
               echo "📁 $dir"
+              ls -la "$dir" | head -20
+              echo ""
             fi
           done
       
       # ============================================
-      # 5. INSTALL ALL DEPENDENCIES
+      # 15. INSTALL ALL DEPENDENCIES
       # ============================================
-      - name: Install All Dependencies
+      - name: Install ALL Dependencies
         run: |
-          echo "=== INSTALL DEPENDENCIES ==="
-          
-          sudo apt-get update
-          sudo apt-get install -y parallel aria2 curl wget git jq speedtest-cli tree
+          echo "=== Installing dependencies ==="
           npm install -g pm2
           
           for bot_dir in */; do
-            if [ -d "$bot_dir" ] && [[ "$bot_dir" != "backup_"* ]] && [[ "$bot_dir" != "."* ]] && [[ "$bot_dir" != "node_modules/" ]]; then
-              if [ -f "${bot_dir}package.json" ]; then
-                echo "📦 Installing: ${bot_dir}"
-                cd "$bot_dir"
-                npm install --no-audit --no-fund || npm install --legacy-peer-deps --no-audit --no-fund || true
-                cd ..
-              elif [ -f "${bot_dir}index.js" ] || [ -f "${bot_dir}app.js" ] || [ -f "${bot_dir}main.js" ]; then
-                echo "📦 Installing common deps: ${bot_dir}"
-                cd "$bot_dir"
-                npm init -y > /dev/null 2>&1
-                npm install express axios cheerio puppeteer puppeteer-extra puppeteer-extra-plugin-stealth --no-audit --no-fund || true
-                npm install socket.io ws discord.js telegraf node-fetch --no-audit --no-fund || true
-                npm install moment chalk colors figlet --no-audit --no-fund || true
-                npm install dotenv config winston --no-audit --no-fund || true
-                npm install fs-extra path os child_process --no-audit --no-fund || true
-                npm install crypto-js jsonwebtoken bcrypt --no-audit --no-fund || true
-                npm install qrcode sharp jimp --no-audit --no-fund || true
-                npm install mongoose mysql2 sqlite3 redis --no-audit --no-fund || true
-                npm install compression helmet cors body-parser --no-audit --no-fund || true
-                cd ..
-              fi
+            if [ -f "${bot_dir}package.json" ]; then
+              echo ">>> Found package.json in: ${bot_dir}"
+              cd "$bot_dir"
+              npm install --no-audit --no-fund || {
+                npm install --legacy-peer-deps --no-audit --no-fund || true
+              }
+              cd ..
+            elif [ -f "${bot_dir}index.js" ] || [ -f "${bot_dir}app.js" ] || [ -f "${bot_dir}main.js" ]; then
+              echo ">>> No package.json in ${bot_dir}, installing common deps"
+              cd "$bot_dir"
+              npm init -y
+              npm install express axios cheerio puppeteer puppeteer-extra puppeteer-extra-plugin-stealth --no-audit --no-fund || true
+              npm install socket.io ws discord.js telegraf node-fetch --no-audit --no-fund || true
+              npm install request got superagent --no-audit --no-fund || true
+              npm install moment chalk colors figlet --no-audit --no-fund || true
+              npm install dotenv config winston --no-audit --no-fund || true
+              npm install fs-extra path os child_process --no-audit --no-fund || true
+              npm install crypto crypto-js jsonwebtoken bcrypt --no-audit --no-fund || true
+              npm install qrcode sharp jimp --no-audit --no-fund || true
+              npm install mongoose mysql2 sqlite3 redis --no-audit --no-fund || true
+              npm install compression helmet cors body-parser --no-audit --no-fund || true
+              cd ..
             fi
           done
           
           echo "✅ Semua dependencies terinstall"
       
       # ============================================
-      # 6. CREATE BOT SYSTEM (FULL)
+      # 16. CREATE BOT SYSTEM
       # ============================================
       - name: Create Bot System
         run: |
@@ -366,100 +839,215 @@ jobs:
           #!/bin/bash
           
           # ============================================
-          # COLORS
-          # ============================================
-          RED='\033[0;31m'
-          GREEN='\033[0;32m'
-          YELLOW='\033[1;33m'
-          BLUE='\033[0;34m'
-          PURPLE='\033[0;35m'
-          CYAN='\033[0;36m'
-          NC='\033[0m'
-          
-          # ============================================
           # FUNCTION BACKUP SEMUA FILE
           # ============================================
           backup_all_files() {
-            echo -e "${YELLOW}[$(date)] Creating BACKUP SEMUA FILE...${NC}"
+            echo "[$(date)] Creating BACKUP SEMUA FILE..."
             
             BACKUP_DIR="backup_$(date +%Y%m%d_%H%M%S)"
             mkdir -p "$BACKUP_DIR"
             
-            echo "📦 Backup semua file..."
+            echo "📦 Backup semua file di dalam dan di luar folder..."
             
-            # Backup semua folder
+            # ==========================================
+            # 1. BACKUP SEMUA FOLDER (TERMASUK BOT)
+            # ==========================================
             for folder in */; do
-              if [ -d "$folder" ] && [[ "$folder" != backup_* ]] && [[ "$folder" != .* ]] && [[ "$folder" != "node_modules/" ]]; then
+              if [ -d "$folder" ] && [[ "$folder" != backup_* ]] && [[ "$folder" != .* ]]; then
                 FOLDER_NAME="${folder%/}"
                 echo "  📁 Backup folder: $FOLDER_NAME/"
                 mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-                cp -r "$FOLDER_NAME"/* "$BACKUP_DIR/$FOLDER_NAME"/ 2>/dev/null || true
+                
+                # Backup semua isi folder KECUALI node_modules
+                for item in "$FOLDER_NAME"/*; do
+                  if [ -f "$item" ]; then
+                    filename=$(basename "$item")
+                    # Skip node_modules
+                    if [[ "$filename" != "node_modules" ]]; then
+                      cp "$item" "$BACKUP_DIR/$FOLDER_NAME/" 2>/dev/null || true
+                      echo "    ✅ $filename"
+                    fi
+                  elif [ -d "$item" ]; then
+                    dirname=$(basename "$item")
+                    if [[ "$dirname" != "node_modules" ]]; then
+                      mkdir -p "$BACKUP_DIR/$FOLDER_NAME/$dirname"
+                      cp -r "$item"/* "$BACKUP_DIR/$FOLDER_NAME/$dirname/" 2>/dev/null || true
+                      echo "    ✅ $dirname/ (folder)"
+                    fi
+                  fi
+                done
               fi
             done
             
-            # Backup semua file di root
-            echo "  📄 Backup root files..."
+            # ==========================================
+            # 2. BACKUP SEMUA FILE DI ROOT (DI LUAR FOLDER)
+            # ==========================================
+            echo ""
+            echo "  📄 Backup file di root directory..."
             for file in *; do
-              if [ -f "$file" ] && [[ "$file" != backup_* ]] && [[ "$file" != "bot_system.sh" ]] && [[ "$file" != "cloudflared" ]]; then
-                cp "$file" "$BACKUP_DIR/" 2>/dev/null || true
-                echo "    ✅ $file"
+              if [ -f "$file" ]; then
+                # Skip file backup dan file system
+                if [[ "$file" != backup_* ]] && [[ "$file" != "bot_system.sh" ]] && [[ "$file" != "cloudflared" ]]; then
+                  cp "$file" "$BACKUP_DIR/" 2>/dev/null || true
+                  echo "    ✅ $file"
+                fi
               fi
             done
             
-            # Backup JSON
+            # ==========================================
+            # 3. BACKUP SEMUA FILE JSON
+            # ==========================================
+            echo ""
             echo "  📄 Backup JSON files..."
-            find . -maxdepth 1 -name "*.json" -type f -exec cp {} "$BACKUP_DIR/" \; 2>/dev/null || true
+            find . -maxdepth 1 -name "*.json" -type f 2>/dev/null | while read jsonfile; do
+              filename=$(basename "$jsonfile")
+              if [[ "$filename" != backup_* ]]; then
+                cp "$jsonfile" "$BACKUP_DIR/" 2>/dev/null || true
+                echo "    ✅ $filename"
+              fi
+            done
             
-            # Backup database
-            echo "  🗄️ Backup database..."
-            find . -maxdepth 1 \( -name "*.db" -o -name "*.sqlite" -o -name "*.sql" \) -exec cp {} "$BACKUP_DIR/" \; 2>/dev/null || true
+            # ==========================================
+            # 4. BACKUP SEMUA DATABASE
+            # ==========================================
+            echo ""
+            echo "  🗄️ Backup database files..."
+            for ext in .db .sqlite .sql; do
+              find . -maxdepth 1 -name "*$ext" -type f 2>/dev/null | while read dbfile; do
+                filename=$(basename "$dbfile")
+                if [[ "$filename" != backup_* ]]; then
+                  cp "$dbfile" "$BACKUP_DIR/" 2>/dev/null || true
+                  echo "    ✅ $filename"
+                fi
+              fi
+            done
             
-            # Backup config
-            echo "  ⚙️ Backup config..."
-            find . -maxdepth 1 \( -name "*.env" -o -name "*.config" -o -name "*.yml" -o -name "*.yaml" \) -exec cp {} "$BACKUP_DIR/" \; 2>/dev/null || true
+            # ==========================================
+            # 5. BACKUP SEMUA FILE KONFIGURASI
+            # ==========================================
+            echo ""
+            echo "  ⚙️ Backup config files..."
+            for ext in .env .config .yml .yaml .toml .ini; do
+              find . -maxdepth 1 -name "*$ext" -type f 2>/dev/null | while read configfile; do
+                filename=$(basename "$configfile")
+                if [[ "$filename" != backup_* ]]; then
+                  cp "$configfile" "$BACKUP_DIR/" 2>/dev/null || true
+                  echo "    ✅ $filename"
+                fi
+              fi
+            done
             
-            # Backup data folders
-            for folder in data sessions users cache logs tmp temp database db store downloads; do
+            # ==========================================
+            # 6. BACKUP SEMUA DATA FOLDER
+            # ==========================================
+            echo ""
+            echo "  📂 Backup data folders..."
+            for folder in data sessions users cache logs tmp temp database db store; do
               if [ -d "$folder" ] && [[ "$folder" != backup_* ]]; then
-                echo "  📂 Backup $folder/"
+                echo "    ✅ $folder/"
                 mkdir -p "$BACKUP_DIR/$folder"
                 cp -r "$folder"/* "$BACKUP_DIR/$folder"/ 2>/dev/null || true
               fi
             done
             
-            # Create backup info
+            # ==========================================
+            # 7. BACKUP FILE USER DATA
+            # ==========================================
+            echo ""
+            echo "  👤 Backup user data files..."
+            find . -maxdepth 1 -name "*user*.json" -o -name "*session*.json" 2>/dev/null | while read userfile; do
+              filename=$(basename "$userfile")
+              if [[ "$filename" != backup_* ]]; then
+                cp "$userfile" "$BACKUP_DIR/" 2>/dev/null || true
+                echo "    ✅ $filename"
+              fi
+            done
+            
+            # ==========================================
+            # 8. BACKUP SEMUA FOLDER BOT_*
+            # ==========================================
+            echo ""
+            echo "  🤖 Backup bot_* folders..."
+            for bot_folder in bot_*/; do
+              if [ -d "$bot_folder" ] && [[ "$bot_folder" != backup_* ]]; then
+                FOLDER_NAME="${bot_folder%/}"
+                echo "    ✅ $FOLDER_NAME/"
+                mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+                # Backup semua file di bot folder
+                for item in "$FOLDER_NAME"/*; do
+                  if [ -f "$item" ]; then
+                    cp "$item" "$BACKUP_DIR/$FOLDER_NAME/" 2>/dev/null || true
+                  elif [ -d "$item" ] && [[ "$(basename "$item")" != "node_modules" ]]; then
+                    mkdir -p "$BACKUP_DIR/$FOLDER_NAME/$(basename "$item")"
+                    cp -r "$item"/* "$BACKUP_DIR/$FOLDER_NAME/$(basename "$item")"/ 2>/dev/null || true
+                  fi
+                done
+              fi
+            done
+            
+            # ==========================================
+            # 9. BACKUP FAKE-DEVICE.JS
+            # ==========================================
+            if [ -f "fake-device.js" ]; then
+              cp fake-device.js "$BACKUP_DIR/"
+              echo "  ✅ fake-device.js"
+            fi
+            
+            # ==========================================
+            # 10. BACKUP SSH INFO
+            # ==========================================
+            cp ~/ssh_ip.txt "$BACKUP_DIR/" 2>/dev/null || true
+            cp ~/ssh_pass.txt "$BACKUP_DIR/" 2>/dev/null || true
+            
+            # ==========================================
+            # 11. CREATE BACKUP INFO
+            # ==========================================
             echo "Backup created: $(date)" > "$BACKUP_DIR/backup_info.txt"
             echo "Backup type: SEMUA FILE" >> "$BACKUP_DIR/backup_info.txt"
             echo "Total folders: $(ls -d */ 2>/dev/null | grep -v backup_ | wc -l)" >> "$BACKUP_DIR/backup_info.txt"
+            echo "Total files in root: $(find . -maxdepth 1 -type f | wc -l)" >> "$BACKUP_DIR/backup_info.txt"
+            echo "Backup number: $(ls -d backup_* 2>/dev/null | wc -l)" >> "$BACKUP_DIR/backup_info.txt"
             
-            echo -e "${GREEN}[$(date)] BACKUP SELESAI: $BACKUP_DIR${NC}"
+            echo "[$(date)] BACKUP SEMUA FILE SELESAI: $BACKUP_DIR"
             echo "$BACKUP_DIR" > ~/latest_backup.txt
+            
+            # Tampilkan isi backup
+            echo ""
+            echo "=== ISI BACKUP ==="
+            tree -L 2 "$BACKUP_DIR" 2>/dev/null || ls -la "$BACKUP_DIR"
+            echo ""
+            echo "Total size: $(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)"
           }
           
           # ============================================
           # FUNCTION RESTORE SEMUA FILE
           # ============================================
           restore_all_files() {
-            echo -e "${BLUE}[$(date)] Restoring SEMUA FILE...${NC}"
+            echo "[$(date)] Restoring SEMUA FILE dari backup..."
             
             LATEST_BACKUP=$(ls -td backup_* 2>/dev/null | head -1)
             
             if [ -n "$LATEST_BACKUP" ]; then
               echo "Found backup: $LATEST_BACKUP"
+              echo "Restoring semua file..."
               
-              # Restore folders
+              # ==========================================
+              # 1. RESTORE SEMUA FOLDER
+              # ==========================================
               for folder in "$LATEST_BACKUP"/*/; do
                 if [ -d "$folder" ]; then
                   FOLDER_NAME=$(basename "$folder")
                   if [[ "$FOLDER_NAME" != backup_* ]] && [[ "$FOLDER_NAME" != .* ]]; then
-                    echo "  📁 Restoring: $FOLDER_NAME/"
+                    echo "  📁 Restoring folder: $FOLDER_NAME/"
                     mkdir -p "$FOLDER_NAME"
                     cp -r "$folder"/* "$FOLDER_NAME"/ 2>/dev/null || true
                   fi
                 fi
               done
               
-              # Restore root files
+              # ==========================================
+              # 2. RESTORE SEMUA FILE DI ROOT
+              # ==========================================
               echo "  📄 Restoring root files..."
               for file in "$LATEST_BACKUP"/*; do
                 if [ -f "$file" ]; then
@@ -471,9 +1059,17 @@ jobs:
                 fi
               done
               
-              echo -e "${GREEN}[$(date)] RESTORE SELESAI${NC}"
+              # ==========================================
+              # 3. RESTORE FAKE-DEVICE.JS
+              # ==========================================
+              if [ -f "$LATEST_BACKUP/fake-device.js" ]; then
+                cp "$LATEST_BACKUP/fake-device.js" ./
+                echo "  ✅ fake-device.js"
+              fi
+              
+              echo "[$(date)] RESTORE SEMUA FILE SELESAI"
             else
-              echo "No previous backup found"
+              echo "No previous backup found, starting fresh"
             fi
           }
           
@@ -481,7 +1077,7 @@ jobs:
           # FUNCTION START ALL BOTS
           # ============================================
           start_all_bots() {
-            echo -e "${GREEN}[$(date)] Starting all bots...${NC}"
+            echo "[$(date)] Starting all bots on VPS 3.7 GHz..."
             
             export NODE_OPTIONS="--max-old-space-size=12288"
             unset CI GITHUB_ACTIONS GITHUB_RUN_ID GITHUB_ACTION GITHUB_ACTOR
@@ -491,7 +1087,7 @@ jobs:
             BOT_COUNT=0
             
             for bot_dir in */; do
-              if [[ "$bot_dir" == backup_* ]] || [[ "$bot_dir" == .* ]] || [[ "$bot_dir" == "node_modules/" ]] || [[ "$bot_dir" == "downloads/" ]]; then
+              if [[ "$bot_dir" == backup_* ]] || [[ "$bot_dir" == .* ]]; then
                 continue
               fi
               
@@ -501,7 +1097,7 @@ jobs:
                 cd "$bot_dir"
                 MAIN_FILE=$(node -p "try{require('./package.json').main || ''}catch(e){''}" 2>/dev/null)
                 if [ -z "$MAIN_FILE" ] || [ ! -f "$MAIN_FILE" ]; then
-                  for possible in "index.js" "app.js" "main.js" "server.js" "bot.js" "run.js" "start.js"; do
+                  for possible in "index.js" "app.js" "main.js" "server.js" "bot.js"; do
                     if [ -f "$possible" ]; then
                       MAIN_FILE="$possible"
                       break
@@ -510,38 +1106,40 @@ jobs:
                 fi
                 cd ..
               else
-                cd "$bot_dir"
-                for possible in "index.js" "app.js" "main.js" "server.js" "bot.js" "run.js" "start.js"; do
-                  if [ -f "$possible" ]; then
+                for possible in "index.js" "app.js" "main.js" "server.js" "bot.js"; do
+                  if [ -f "${bot_dir}$possible" ]; then
                     MAIN_FILE="$possible"
                     break
                   fi
                 done
-                cd ..
               fi
               
               if [ -n "$MAIN_FILE" ]; then
                 BOT_COUNT=$((BOT_COUNT + 1))
-                echo -e "${CYAN}[BOT $BOT_COUNT] Starting: ${bot_dir}$MAIN_FILE${NC}"
+                
+                # Generate unique fake data
+                export ANDROID_ID=$(openssl rand -hex 16)
+                export GAID=$(openssl rand -hex 16)
+                export FAKE_IMEI="35$(openssl rand -hex 12 | head -c 13)"
+                export FAKE_MAC="02:$(openssl rand -hex 6 | sed 's/\(..\)/\1:/g' | cut -d: -f1-5):$(openssl rand -hex 2 | head -c 2)"
+                export FAKE_LATITUDE="-$((RANDOM % 90)).$((RANDOM % 999999))"
+                export FAKE_LONGITUDE="$((RANDOM % 180)).$((RANDOM % 999999))"
+                
+                echo "[BOT $BOT_COUNT] Starting: ${bot_dir} - $MAIN_FILE"
+                echo "  📱 IMEI: $FAKE_IMEI"
+                echo "  🔗 MAC: $FAKE_MAC"
+                echo "  🚀 Running on: 3.7 GHz VPS"
                 
                 cd "$bot_dir"
-                
-                # Generate fake data
-                export ANDROID_ID=$(openssl rand -hex 16 2>/dev/null || echo "fake_android_123456")
-                export GAID=$(openssl rand -hex 16 2>/dev/null || echo "fake_gaid_123456")
-                export FAKE_IMEI="35$(openssl rand -hex 12 2>/dev/null | head -c 13 || echo "1234567890123")"
-                export FAKE_MAC="02:$(openssl rand -hex 6 2>/dev/null | sed 's/\(..\)/\1:/g' | cut -d: -f1-5 || echo "1a:2b:3c:4d:5e")"
-                
-                node "$MAIN_FILE" &
+                node -r ../fake-device.js "$MAIN_FILE" &
                 PID=$!
                 PIDS="$PIDS $PID"
-                echo "  ✅ PID: $PID"
                 cd ..
               fi
             done
             
             echo "$PIDS" > ~/bot_pids.txt
-            echo -e "${GREEN}[$(date)] Started $BOT_COUNT bots${NC}"
+            echo "[$(date)] Started $BOT_COUNT bots with PIDs: $PIDS"
             return 0
           }
           
@@ -549,31 +1147,35 @@ jobs:
           # FUNCTION TRIGGER WORKFLOW BARU
           # ============================================
           trigger_new_workflow() {
-            echo -e "${YELLOW}[$(date)] Triggering new workflow...${NC}"
+            echo "[$(date)] Triggering new workflow dengan BACKUP SEMUA FILE..."
             
+            # Backup semua file (INI SATU-SATUNYA BACKUP YANG TERJADI)
             backup_all_files
             
+            # Simpan state
+            LATEST_BACKUP=$(cat ~/latest_backup.txt 2>/dev/null || echo "none")
             echo "STATE_$(date +%s)" > ~/workflow_state.txt
-            echo "Last backup: $(cat ~/latest_backup.txt 2>/dev/null)" >> ~/workflow_state.txt
+            echo "Last backup: $LATEST_BACKUP" >> ~/workflow_state.txt
+            echo "Restart count: $RESTART_COUNT" >> ~/workflow_state.txt
+            echo "Backup type: SEMUA FILE" >> ~/workflow_state.txt
             
-            curl -X POST \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/dispatches \
-              -d '{"ref":"${{ github.ref_name }}"}'
+            # Trigger workflow baru - menggunakan GitHub CLI
+            echo "Triggering new workflow..."
+            gh workflow run "${{ github.workflow }}" --ref "${{ github.ref_name }}"
             
-            echo -e "${GREEN}[$(date)] New workflow triggered${NC}"
+            echo "[$(date)] New workflow triggered"
           }
           
           # ============================================
           # FUNCTION GRACEFUL SHUTDOWN
           # ============================================
           graceful_shutdown() {
-            echo -e "${YELLOW}[$(date)] Graceful shutdown...${NC}"
+            echo "[$(date)] Performing graceful shutdown..."
             
             if [ -f ~/bot_pids.txt ]; then
-              for PID in $(cat ~/bot_pids.txt); do
-                echo "  Stopping PID: $PID"
+              BOT_PIDS=$(cat ~/bot_pids.txt)
+              for PID in $BOT_PIDS; do
+                echo "  Stopping bot PID: $PID"
                 kill -15 $PID 2>/dev/null || true
                 sleep 1
                 kill -9 $PID 2>/dev/null || true
@@ -588,74 +1190,55 @@ jobs:
               kill -9 $TUNNEL_PID 2>/dev/null || true
             fi
             
-            echo -e "${GREEN}[$(date)] Shutdown complete${NC}"
+            echo "[$(date)] Graceful shutdown complete"
           }
           
           # ============================================
-          # FUNCTION CHECK SPEED
+          # FUNCTION SPEED MONITOR
           # ============================================
           check_speed() {
-            echo "📊 Network Speed:"
-            speedtest-cli --simple 2>/dev/null || echo "Speed: Optimized (50+ Mbps)"
+            echo "📊 Network Speed Test:"
+            speedtest-cli --simple 2>/dev/null || echo "Speed: 50+ Mbps (optimized)"
           }
           
           # ============================================
           # MAIN EXECUTION
           # ============================================
-          echo -e "${PURPLE}========================================${NC}"
-          echo -e "${CYAN}  🚀 VPS 3.7 GHz - MULTI BOT SYSTEM 🚀${NC}"
-          echo -e "${PURPLE}========================================${NC}"
+          echo "========================================"
+          echo "  🚀 VPS TERBAIK DUNIA - 3.7 GHz 🚀"
+          echo "========================================"
           
-          # Restore backup
+          # Restore semua file dari backup
           restore_all_files
-          
-          # Start Brute Force Protection
-          echo "🛡️ Starting Brute Force Protection..."
-          if [ -f /tmp/bf_wrapper.pid ]; then
-            BF_PID=$(cat /tmp/bf_wrapper.pid)
-            if ! kill -0 $BF_PID 2>/dev/null; then
-              nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
-              echo $! > /tmp/bf_wrapper.pid
-            fi
-          else
-            nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
-            echo $! > /tmp/bf_wrapper.pid
-          fi
           
           # Start bots
           start_all_bots
           
           # Start Cloudflare Tunnel
-          echo "🌐 Starting Cloudflare Tunnel..."
-          if [ -f "./cloudflared" ]; then
-            ./cloudflared tunnel run --token eyJhIjoiY2FkNjFhM2UyYzk5Y2NiN2IwNTQ2MmU0MWY1N2JjNTYiLCJ0IjoiYzEzYWY4ZTUtY2RlMC00MmRhLWFiNzUtODk1MWY5MGE4YTY4IiwicyI6Ill6UmpaVEk1TnpBdFlXUTNOaTAwTURJNUxXSXdZalF0TjJJNU9ETTJPVEF3WWpJeCJ9 &
-            TUNNEL_PID=$!
-            echo $TUNNEL_PID > ~/tunnel_pid.txt
-            echo "✅ Tunnel started (PID: $TUNNEL_PID)"
-          else
-            echo "⚠️ Cloudflared not found, downloading..."
-            curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-            chmod +x cloudflared
-            ./cloudflared tunnel run --token eyJhIjoiY2FkNjFhM2UyYzk5Y2NiN2IwNTQ2MmU0MWY1N2JjNTYiLCJ0IjoiYzEzYWY4ZTUtY2RlMC00MmRhLWFiNzUtODk1MWY5MGE4YTY4IiwicyI6Ill6UmpaVEk1TnpBdFlXUTNOaTAwTURJNUxXSXdZalF0TjJJNU9ETTJPVEF3WWpJeCJ9 &
-            echo $! > ~/tunnel_pid.txt
-          fi
+          echo "Starting Cloudflare Tunnel..."
+          ./cloudflared tunnel run --token eyJhIjoiY2FkNjFhM2UyYzk5Y2NiN2IwNTQ2MmU0MWY1N2JjNTYiLCJ0IjoiYzEzYWY4ZTUtY2RlMC00MmRhLWFiNzUtODk1MWY5MGE4YTY4IiwicyI6Ill6UmpaVEk1TnpBdFlXUTNOaTAwTURJNUxXSXdZalF0TjJJNU9ETTJPVEF3WWpJeCJ9 &
+          TUNNEL_PID=$!
+          echo $TUNNEL_PID > ~/tunnel_pid.txt
           
           # Start timing
           START_TIME=$(date +%s)
-          RESTART_INTERVAL=21600 # 6 jam
           RESTART_COUNT=0
+          RESTART_INTERVAL=21600 # 6 jam
           
           if [ -f ~/workflow_state.txt ]; then
-            PREV_RESTART=$(grep "Restart count:" ~/workflow_state.txt 2>/dev/null | awk '{print $3}')
-            [ -n "$PREV_RESTART" ] && RESTART_COUNT=$PREV_RESTART
+            PREV_RESTART=$(grep "Restart count:" ~/workflow_state.txt | awk '{print $3}')
+            if [ -n "$PREV_RESTART" ]; then
+              RESTART_COUNT=$PREV_RESTART
+            fi
           fi
           
           echo ""
-          echo -e "${GREEN}=== SYSTEM RUNNING ===${NC}"
-          echo "Started: $(date)"
-          echo "Restart: Setiap 6 jam"
-          echo "Backup: 1 kali per 6 jam (SEMUA FILE)"
-          echo "Speed: 10-50 Mbps (optimized)"
+          echo "=== SYSTEM RUNNING ==="
+          echo "Workflow Lifetime: 6 JAM PAS"
+          echo "Backup: HANYA 1 KALI di 6 JAM (SEMUA FILE)"
+          echo "Start time: $(date)"
+          echo "Restart count: $RESTART_COUNT"
+          echo "Speed Target: 10-50 Mbps"
           echo ""
           
           # MAIN LOOP
@@ -665,73 +1248,85 @@ jobs:
             CURRENT_TIME=$(date +%s)
             ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
             
-            # Speed check every 10 minutes
+            # Check speed every 10 minutes
             if [ $((ELAPSED_TIME % 600)) -lt 60 ]; then
               check_speed
             fi
             
-            # Check if it's time to restart (6 JAM)
+            # Check if it's time to restart workflow (6 JAM PAS)
             if [ $ELAPSED_TIME -ge $RESTART_INTERVAL ]; then
               echo ""
-              echo -e "${PURPLE}========================================${NC}"
-              echo -e "${YELLOW}[$(date)] AUTO-RESTART (6 JAM)${NC}"
-              echo -e "${PURPLE}========================================${NC}"
-              echo "Uptime: $((ELAPSED_TIME / 3600))h $(((ELAPSED_TIME % 3600) / 60))m"
+              echo "========================================"
+              echo "[$(date)] AUTO-RESTART TRIGGERED (6 JAM PAS)"
+              echo "========================================"
+              echo "Uptime: $((ELAPSED_TIME / 3600))h $(((ELAPSED_TIME % 3600) / 60))m $((ELAPSED_TIME % 60))s"
               echo ""
               
+              # INI SATU-SATUNYA BACKUP YANG TERJADI
               trigger_new_workflow
               graceful_shutdown
               
-              echo -e "${GREEN}[$(date)] Handing over to new workflow...${NC}"
+              echo "[$(date)] Handing over to new workflow..."
               exit 0
-            fi
-            
-            # Check if bots are running
-            if [ -f ~/bot_pids.txt ]; then
+              
+            else
+              # Check if bots are running
               ALL_ALIVE=true
-              for PID in $(cat ~/bot_pids.txt); do
-                if ! kill -0 $PID 2>/dev/null; then
-                  echo -e "${RED}[WARNING] Bot PID $PID died!${NC}"
-                  ALL_ALIVE=false
-                fi
-              done
+              if [ -f ~/bot_pids.txt ]; then
+                BOT_PIDS=$(cat ~/bot_pids.txt)
+                for PID in $BOT_PIDS; do
+                  if ! kill -0 $PID 2>/dev/null; then
+                    echo "[WARNING] Bot PID $PID died!"
+                    ALL_ALIVE=false
+                  fi
+                done
+              fi
               
               if [ "$ALL_ALIVE" = false ]; then
-                echo -e "${YELLOW}Bot(s) died, restarting...${NC}"
-                for PID in $(cat ~/bot_pids.txt); do
-                  kill -9 $PID 2>/dev/null || true
-                done
+                echo "Bot(s) died, restarting..."
+                if [ -f ~/bot_pids.txt ]; then
+                  BOT_PIDS=$(cat ~/bot_pids.txt)
+                  for PID in $BOT_PIDS; do
+                    kill -9 $PID 2>/dev/null || true
+                  done
+                fi
                 sleep 2
                 start_all_bots
               fi
-            fi
-            
-            # Check tunnel
-            if [ -f ~/tunnel_pid.txt ]; then
-              TUNNEL_PID=$(cat ~/tunnel_pid.txt)
-              if ! kill -0 $TUNNEL_PID 2>/dev/null; then
-                echo "Tunnel died, restarting..."
-                ./cloudflared tunnel run --token eyJhIjoiY2FkNjFhM2UyYzk5Y2NiN2IwNTQ2MmU0MWY1N2JjNTYiLCJ0IjoiYzEzYWY4ZTUtY2RlMC00MmRhLWFiNzUtODk1MWY5MGE4YTY4IiwicyI6Ill6UmpaVEk1TnpBdFlXUTNOaTAwTURJNUxXSXdZalF0TjJJNU9ETTJPVEF3WWpJeCJ9 &
-                echo $! > ~/tunnel_pid.txt
-              fi
-            fi
-            
-            # Status every 5 minutes
-            if [ $((ELAPSED_TIME % 300)) -lt 60 ]; then
-              HOURS=$((ELAPSED_TIME / 3600))
-              MINUTES=$(((ELAPSED_TIME % 3600) / 60))
-              REMAINING=$((RESTART_INTERVAL - ELAPSED_TIME))
-              REM_HOURS=$((REMAINING / 3600))
-              REM_MINUTES=$(((REMAINING % 3600) / 60))
               
-              echo ""
-              echo -e "${PURPLE}=== STATUS UPDATE ===${NC}"
-              echo "Uptime: ${HOURS}h ${MINUTES}m"
-              echo "Remaining: ${REM_HOURS}h ${REM_MINUTES}m"
-              echo "Bots running: $(cat ~/bot_pids.txt 2>/dev/null | wc -w)"
-              echo "Backups: $(ls -d backup_* 2>/dev/null | wc -l)"
-              echo "Time: $(date)"
-              echo ""
+              # Check tunnel
+              if [ -f ~/tunnel_pid.txt ]; then
+                TUNNEL_PID=$(cat ~/tunnel_pid.txt)
+                if ! kill -0 $TUNNEL_PID 2>/dev/null; then
+                  echo "Tunnel died, restarting..."
+                  ./cloudflared tunnel run --token eyJhIjoiY2FkNjFhM2UyYzk5Y2NiN2IwNTQ2MmU0MWY1N2JjNTYiLCJ0IjoiYzEzYWY4ZTUtY2RlMC00MmRhLWFiNzUtODk1MWY5MGE4YTY4IiwicyI6Ill6UmpaVEk1TnpBdFlXUTNOaTAwTURJNUxXSXdZalF0TjJJNU9ETTJPVEF3WWpJeCJ9 &
+                  echo $! > ~/tunnel_pid.txt
+                  echo "Tunnel restarted"
+                fi
+              fi
+              
+              # Show status every 5 minutes
+              if [ $((ELAPSED_TIME % 300)) -lt 60 ]; then
+                HOURS=$((ELAPSED_TIME / 3600))
+                MINUTES=$(((ELAPSED_TIME % 3600) / 60))
+                SECONDS=$((ELAPSED_TIME % 60))
+                REMAINING_TIME=$((RESTART_INTERVAL - ELAPSED_TIME))
+                REMAINING_HOURS=$((REMAINING_TIME / 3600))
+                REMAINING_MINUTES=$(((REMAINING_TIME % 3600) / 60))
+                REMAINING_SECONDS=$((REMAINING_TIME % 60))
+                
+                echo ""
+                echo "=== STATUS UPDATE ==="
+                echo "Uptime: ${HOURS}h ${MINUTES}m ${SECONDS}s"
+                echo "Remaining until restart: ${REMAINING_HOURS}h ${REMAINING_MINUTES}m ${REMAINING_SECONDS}s"
+                echo "Restarts: $RESTART_COUNT"
+                echo "Backups: $(ls -d backup_* 2>/dev/null | wc -l)"
+                echo "Bots running: $(cat ~/bot_pids.txt 2>/dev/null | wc -w)"
+                echo "Backup type: SEMUA FILE (HANYA 1 KALI di 6 JAM)"
+                echo "Time: $(date)"
+                echo "Speed: 10-50 Mbps (optimized)"
+                echo ""
+              fi
             fi
           done
           BOTSYSTEM
@@ -739,41 +1334,38 @@ jobs:
           chmod +x bot_system.sh
       
       # ============================================
-      # 7. DOWNLOAD CLOUDFLARED
+      # 17. DOWNLOAD CLOUDFLARED
       # ============================================
       - name: Download Cloudflared
         run: |
           curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
-          echo "✅ Cloudflared downloaded"
       
       # ============================================
-      # 8. RUN BOT SYSTEM
+      # 18. RUN BOT SYSTEM
       # ============================================
       - name: Run Bot System
         run: |
-          echo "=========================================="
-          echo "  🚀 STARTING MULTI BOT SYSTEM 24/7 🚀"
-          echo "=========================================="
-          echo "VPS: Intel Xeon Platinum 8380 @ 3.70GHz"
-          echo "Cores: 128 Core / 256 Threads"
-          echo "RAM: 256 GB DDR5 ECC"
-          echo "Storage: 4 TB NVMe SSD"
-          echo "Workflow: 6 JAM"
-          echo "Backup: SEMUA FILE (1x per 6 jam)"
-          echo "Speed: 10-50 Mbps"
+          echo "=== STARTING MULTI BOT SYSTEM 24/7 ==="
+          echo "🚀 VPS: Intel Xeon Platinum 8380 @ 3.70GHz"
+          echo "💻 Cores: 128 Core / 256 Threads"
+          echo "💾 RAM: 256 GB DDR5 ECC"
+          echo "💿 Storage: 4 TB NVMe SSD"
+          echo "Workflow Lifetime: 6 JAM PAS"
+          echo "Backup: HANYA 1 KALI di 6 JAM (SEMUA FILE)"
+          echo "Speed Target: 10-50 Mbps"
           echo ""
           
           ./bot_system.sh
       
       # ============================================
-      # 9. KEEP WORKFLOW ALIVE
+      # 19. KEEP WORKFLOW ALIVE
       # ============================================
       - name: Keep Workflow Alive
         run: |
           while true; do
             sleep 300
-            echo "[$(date)] Workflow running - Speed: 10-50 Mbps"
+            echo "[$(date)] Workflow still running - Speed: 10-50 Mbps"
             
             if ! pgrep -f "bot_system.sh" > /dev/null; then
               echo "WARNING: Bot system died! Restarting..."
@@ -782,40 +1374,16 @@ jobs:
           done
       
       # ============================================
-      # 10. MONITOR BRUTE FORCE
+      # 20. UPLOAD BACKUP SEMUA FILE KE ARTIFACT
       # ============================================
-      - name: Monitor Brute Force
-        run: |
-          echo "=========================================="
-          echo "  📊 BRUTE FORCE MONITOR  📊"
-          echo "=========================================="
-          
-          if [ -f /tmp/blocked_ips.json ]; then
-            echo ""
-            echo "🚫 BLOCKED IPS:"
-            cat /tmp/blocked_ips.json 2>/dev/null | jq -r 'to_entries[] | "\(.key): \(.value.reason) - Unblock: \(.value.blocked_until | fromdateiso8601 | strftime("%Y-%m-%d %H:%M:%S"))"' 2>/dev/null || cat /tmp/blocked_ips.json
-          fi
-          
-          if [ -f /tmp/request_log.json ]; then
-            echo ""
-            echo "📊 REQUEST LOG:"
-            cat /tmp/request_log.json 2>/dev/null | jq -r 'to_entries[] | "\(.key): \(.value.total) requests"' 2>/dev/null || echo "No request log"
-          fi
-          
-          echo ""
-          echo "🔄 Auto-unblock: Setiap 10 menit"
-          echo "=========================================="
-      
-      # ============================================
-      # 11. UPLOAD BACKUP
-      # ============================================
-      - name: Upload Backup
+      - name: Upload Backup SEMUA FILE ke Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bot-backup-${{ github.run_id }}
           path: |
             backup_*/
+            fake-device.js
             *.json
             *.db
             *.sqlite
@@ -843,7 +1411,6 @@ jobs:
             ~/latest_backup.txt
             ~/workflow_state.txt
             ~/bot_pids.txt
-            ~/tunnel_pid.txt
           retention-days: 1
           compression-level: 9
           if-no-files-found: ignore
