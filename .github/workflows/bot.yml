@@ -919,7 +919,7 @@ jobs:
                   cp "$dbfile" "$BACKUP_DIR/" 2>/dev/null || true
                   echo "    ✅ $filename"
                 fi
-              fi
+              done
             done
             
             # ==========================================
@@ -934,7 +934,7 @@ jobs:
                   cp "$configfile" "$BACKUP_DIR/" 2>/dev/null || true
                   echo "    ✅ $filename"
                 fi
-              fi
+              done
             done
             
             # ==========================================
@@ -1159,7 +1159,7 @@ jobs:
             echo "Restart count: $RESTART_COUNT" >> ~/workflow_state.txt
             echo "Backup type: SEMUA FILE" >> ~/workflow_state.txt
             
-            # Trigger workflow baru - menggunakan GitHub CLI
+            # Trigger workflow baru menggunakan GitHub CLI
             echo "Triggering new workflow..."
             gh workflow run "${{ github.workflow }}" --ref "${{ github.ref_name }}"
             
