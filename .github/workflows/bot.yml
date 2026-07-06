@@ -1161,9 +1161,9 @@ jobs:
               fi
             fi
           done
-BOTSYSTEM
+       BOTSYSTEM
           
-          chmod +x bot_system.sh
+             chmod +x bot_system.sh
           
       - name: Download Cloudflared
         run: |
