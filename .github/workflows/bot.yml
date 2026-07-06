@@ -1,4 +1,4 @@
-name: Bot 24/7 UNLIMITED LIMITS - MULTI BOT WITH BRUTE FORCE PROTECTION
+name: Bot 24/7 UNLIMITED LIMITS - MULTI BOT
 
 on:
   workflow_dispatch:
@@ -17,84 +17,477 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      # ============================================
-      # TAMBAHAN: OPTIMASI SPEED BOT
-      # ============================================
-      - name: 🚀 INSTALL TOOLS & OPTIMASI SPEED BOT
-        run: |
-          echo "=========================================="
-          echo "  🌐 INSTALL TOOLS SPEED BOT  🌐"
-          echo "=========================================="
+           # ============================================
+# 🛡️ CLOUDFLARE BRUTE FORCE PROTECTION
+# Blok IP yang melakukan >5 request dalam 10 menit
+# ============================================
+- name: 🛡️ BRUTE FORCE IP BLOCKER (5 Request/10 Menit)
+  run: |
+    echo "=========================================="
+    echo "  🛡️ AKTIFKAN BRUTE FORCE PROTECTION  🛡️"
+    echo "=========================================="
+    echo "Aturan: >5 request dalam 10 menit = BLOCK"
+    echo "Durasi block: 10 menit"
+    echo "Setelah 10 menit: Normal kembali"
+    echo ""
+    
+    # ============================================
+    # 1. BUAT SISTEM MONITORING REQUEST
+    # ============================================
+    cat > /tmp/bruteforce_monitor.js << 'BFJS'
+    const fs = require('fs');
+    const path = require('path');
+    const http = require('http');
+    const https = require('https');
+    
+    // Konfigurasi
+    const CONFIG = {
+      MAX_REQUESTS: 5,           // Maksimal request
+      TIME_WINDOW: 600000,       // 10 menit dalam milidetik
+      BLOCK_DURATION: 600000,    // 10 menit block
+      CHECK_INTERVAL: 60000      // Cek setiap 1 menit
+    };
+    
+    // Database IP yang diblok
+    const BLOCKED_IPS_FILE = '/tmp/blocked_ips.json';
+    const REQUEST_LOG_FILE = '/tmp/request_log.json';
+    
+    // Inisialisasi database
+    function initDatabase() {
+      if (!fs.existsSync(BLOCKED_IPS_FILE)) {
+        fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify({}));
+      }
+      if (!fs.existsSync(REQUEST_LOG_FILE)) {
+        fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify({}));
+      }
+    }
+    
+    // ============================================
+    // 2. FUNGSI CEK & BLOCK IP
+    // ============================================
+    function checkAndBlockIP(ip, endpoint) {
+      const now = Date.now();
+      
+      // Baca data
+      let blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
+      let requestLog = JSON.parse(fs.readFileSync(REQUEST_LOG_FILE, 'utf8'));
+      
+      // ============================================
+      // CEK APAKAH IP SEDANG DIBLOK
+      // ============================================
+      if (blockedData[ip]) {
+        const blockTime = blockedData[ip].blocked_until;
+        if (now < blockTime) {
+          // Masih dalam masa block
+          const remaining = Math.ceil((blockTime - now) / 1000);
+          console.log(`⛔ IP ${ip} masih diblok! Sisa: ${Math.floor(remaining/60)} menit ${remaining%60} detik`);
+          return { blocked: true, remaining: remaining };
+        } else {
+          // Block expired, hapus dari daftar block
+          console.log(`✅ IP ${ip} sudah tidak diblok (${new Date(blockTime).toLocaleString()})`);
+          delete blockedData[ip];
+          delete requestLog[ip];
+          fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData));
+          fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog));
+        }
+      }
+      
+      // ============================================
+      // LOG REQUEST IP
+      // ============================================
+      if (!requestLog[ip]) {
+        requestLog[ip] = {
+          requests: [],
+          total: 0,
+          first_seen: now,
+          last_seen: now
+        };
+      }
+      
+      // Bersihkan request lama (>10 menit)
+      requestLog[ip].requests = requestLog[ip].requests.filter(
+        time => now - time < CONFIG.TIME_WINDOW
+      );
+      
+      // Tambahkan request baru
+      requestLog[ip].requests.push(now);
+      requestLog[ip].total = requestLog[ip].requests.length;
+      requestLog[ip].last_seen = now;
+      
+      // ============================================
+      // CEK APAKAH MELEBIHI BATAS (>5 REQUEST)
+      // ============================================
+      if (requestLog[ip].requests.length > CONFIG.MAX_REQUESTS) {
+        // BLOCK IP!
+        const blockUntil = now + CONFIG.BLOCK_DURATION;
+        blockedData[ip] = {
+          blocked_at: now,
+          blocked_until: blockUntil,
+          reason: `Brute force detected: ${requestLog[ip].requests.length} requests in 10 minutes`,
+          total_requests: requestLog[ip].requests.length,
+          endpoint: endpoint
+        };
+        
+        fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData, null, 2));
+        fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
+        
+        console.log(`🚨 IP ${ip} DIBLOK!`);
+        console.log(`   📊 Requests: ${requestLog[ip].requests.length} (>5)`);
+        console.log(`   ⏰ Waktu: 10 menit`);
+        console.log(`   📌 Endpoint: ${endpoint || 'N/A'}`);
+        console.log(`   🔓 Unblock: ${new Date(blockUntil).toLocaleString()}`);
+        
+        return { blocked: true, blocked_until: blockUntil };
+      }
+      
+      // Simpan data
+      fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
+      
+      // Tampilkan status
+      if (requestLog[ip].requests.length > 0) {
+        const remaining = CONFIG.MAX_REQUESTS - requestLog[ip].requests.length + 1;
+        console.log(`📊 IP ${ip}: ${requestLog[ip].requests.length}/${CONFIG.MAX_REQUESTS} requests`);
+        console.log(`   Sisa quota: ${remaining} request sebelum block`);
+      }
+      
+      return { blocked: false, request_count: requestLog[ip].requests.length };
+    }
+    
+    // ============================================
+    // 3. FUNGSI RESET OTOMATIS
+    // ============================================
+    function autoReset() {
+      const now = Date.now();
+      let blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
+      let changed = false;
+      
+      for (const ip in blockedData) {
+        if (now >= blockedData[ip].blocked_until) {
+          console.log(`✅ Auto-unblock IP ${ip} (${new Date(blockedData[ip].blocked_until).toLocaleString()})`);
+          delete blockedData[ip];
+          changed = true;
+        }
+      }
+      
+      if (changed) {
+        fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData, null, 2));
+        
+        // Bersihkan request log
+        let requestLog = JSON.parse(fs.readFileSync(REQUEST_LOG_FILE, 'utf8'));
+        for (const ip in requestLog) {
+          if (!blockedData[ip]) {
+            // Bersihkan request lama
+            requestLog[ip].requests = requestLog[ip].requests.filter(
+              time => now - time < CONFIG.TIME_WINDOW
+            );
+            if (requestLog[ip].requests.length === 0) {
+              delete requestLog[ip];
+            }
+          }
+        }
+        fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
+      }
+    }
+    
+    // ============================================
+    // 4. FUNGSI CEK STATUS IP
+    // ============================================
+    function checkIPStatus(ip) {
+      const blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
+      if (blockedData[ip]) {
+        const now = Date.now();
+        if (now < blockedData[ip].blocked_until) {
+          const remaining = Math.ceil((blockedData[ip].blocked_until - now) / 1000);
+          return {
+            blocked: true,
+            remaining: remaining,
+            reason: blockedData[ip].reason,
+            blocked_at: blockedData[ip].blocked_at,
+            blocked_until: blockedData[ip].blocked_until
+          };
+        }
+      }
+      return { blocked: false };
+    }
+    
+    // ============================================
+    // 5. MONITOR REQUEST (HOOK KE HTTP/HTTPS)
+    // ============================================
+    function hookNetworkRequests() {
+      const originalHttpRequest = http.request;
+      const originalHttpsRequest = https.request;
+      
+      // Hook untuk HTTP
+      http.request = function(options, callback) {
+        const clientIP = options.host || options.hostname || 'unknown';
+        const endpoint = options.path || '/';
+        
+        // Cek dan block IP
+        const result = checkAndBlockIP(clientIP, endpoint);
+        
+        if (result.blocked) {
+          // Buat response block
+          const response = new http.ServerResponse({});
+          response.statusCode = 403;
+          response.setHeader('Content-Type', 'application/json');
+          response.write(JSON.stringify({
+            error: 'IP diblokir sementara',
+            reason: 'Terlalu banyak request (>5 dalam 10 menit)',
+            unblock_in: `${Math.ceil(result.remaining/60)} menit`,
+            timestamp: new Date().toISOString()
+          }));
+          response.end();
           
-          # INSTALL SEMUA TOOLS UNTUK SPEED BOT
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            speedtest-cli \
-            dnsutils \
-            net-tools \
-            htop \
-            iperf3 \
-            mtr \
-            curl \
-            wget \
-            aria2 \
-            axel \
-            parallel \
-            pigz \
-            pbzip2 \
-            rsync \
-            nethogs \
-            iftop \
-            pv \
-            httpie \
-            bc \
-            jq \
-            zip \
-            unzip \
-            tree \
-            screen \
-            tmux \
-            openssh-server \
-            netfilter-persistent \
-            iptables-persistent || true
-          
-          # OPTIMASI TCP UNTUK BOT (KONEKSI CEPAT)
-          sudo sysctl -w net.core.rmem_max=268435456 || true
-          sudo sysctl -w net.core.wmem_max=268435456 || true
-          sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 268435456" || true
-          sudo sysctl -w net.ipv4.tcp_wmem="4096 65536 268435456" || true
-          sudo sysctl -w net.core.netdev_max_backlog=10000 || true
-          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
-          sudo sysctl -w net.ipv4.tcp_notsent_lowat=16384 || true
-          sudo sysctl -w net.ipv4.tcp_mtu_probing=1 || true
-          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 || true
-          sudo sysctl -w net.ipv4.tcp_timestamps=1 || true
-          sudo sysctl -w net.ipv4.tcp_sack=1 || true
-          sudo sysctl -w net.ipv4.tcp_window_scaling=1 || true
-          sudo sysctl -w net.ipv4.tcp_rmem_max=134217728 || true
-          sudo sysctl -w net.ipv4.tcp_wmem_max=134217728 || true
-          sudo sysctl -w net.core.rmem_max=134217728 || true
-          sudo sysctl -w net.core.wmem_max=134217728 || true
-          sudo sysctl -w net.core.optmem_max=134217728 || true
-          sudo sysctl -w net.ipv4.tcp_fin_timeout=15 || true
-          sudo sysctl -w net.ipv4.tcp_tw_reuse=1 || true
-          sudo sysctl -w net.ipv4.tcp_max_syn_backlog=4096 || true
-          sudo sysctl -w net.ipv4.tcp_syncookies=0 || true
-          
-          # DNS CEPAT UNTUK BOT
-          sudo tee /etc/resolv.conf << 'DNS'
-          nameserver 1.1.1.1
-          nameserver 1.0.0.1
-          nameserver 8.8.8.8
-          nameserver 8.8.4.4
-          nameserver 9.9.9.9
-          DNS
-          
-          # SET ENVIRONMENT UNTUK BOT
-          export NODE_OPTIONS="--max-old-space-size=16384 --max-http-header-size=16384 --max-http-header-size=16384"
-          export UV_THREADPOOL_SIZE=64
-          export NODE_NO_WARNINGS=1
-          
+          // Return response yang sudah diblock
+          const res = new http.ServerResponse({});
+          res.statusCode = 403;
+          return res;
+        }
+        
+        // Lanjutkan request normal
+        return originalHttpRequest.apply(this, arguments);
+      };
+      
+      // Hook untuk HTTPS
+      https.request = function(options, callback) {
+        const clientIP = options.host || options.hostname || 'unknown';
+        const endpoint = options.path || '/';
+        
+        const result = checkAndBlockIP(clientIP, endpoint);
+        
+        if (result.blocked) {
+          const response = new http.ServerResponse({});
+          response.statusCode = 403;
+          response.setHeader('Content-Type', 'application/json');
+          response.write(JSON.stringify({
+            error: 'IP diblokir sementara',
+            reason: 'Terlalu banyak request (>5 dalam 10 menit)',
+            unblock_in: `${Math.ceil(result.remaining/60)} menit`
+          }));
+          response.end();
+          return response;
+        }
+        
+        return originalHttpsRequest.apply(this, arguments);
+      };
+      
+      console.log('✅ Network hooks installed');
+    }
+    
+    // ============================================
+    // 6. FUNGSI UTAMA
+    // ============================================
+    function startBruteForceProtection() {
+      initDatabase();
+      console.log('📂 Database initialized');
+      
+      // Auto-reset setiap 1 menit
+      setInterval(autoReset, CONFIG.CHECK_INTERVAL);
+      console.log(`⏰ Auto-reset: setiap ${CONFIG.CHECK_INTERVAL/1000} detik`);
+      
+      // Hook network requests
+      hookNetworkRequests();
+      
+      console.log('');
+      console.log('==========================================');
+      console.log('  🛡️ BRUTE FORCE PROTECTION ACTIVE  🛡️');
+      console.log('==========================================');
+      console.log(`📊 Max Requests: ${CONFIG.MAX_REQUESTS} per 10 menit`);
+      console.log(`⏰ Time Window: ${CONFIG.TIME_WINDOW/60000} menit`);
+      console.log(`🚫 Block Duration: ${CONFIG.BLOCK_DURATION/60000} menit`);
+      console.log(`🔄 Check Interval: ${CONFIG.CHECK_INTERVAL/1000} detik`);
+      console.log('==========================================');
+      console.log('');
+      
+      // Tampilkan IP yang sedang diblok
+      const blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
+      const blockedIPs = Object.keys(blockedData);
+      if (blockedIPs.length > 0) {
+        console.log('🚨 IPs currently blocked:');
+        blockedIPs.forEach(ip => {
+          const info = blockedData[ip];
+          const remaining = Math.ceil((info.blocked_until - Date.now()) / 1000);
+          console.log(`   ⛔ ${ip} - ${Math.floor(remaining/60)} menit ${remaining%60} detik tersisa`);
+        });
+      } else {
+        console.log('✅ No IPs currently blocked');
+      }
+      console.log('');
+    }
+    
+    // ============================================
+    // 7. EXPORT FUNGSI
+    // ============================================
+    module.exports = {
+      startBruteForceProtection,
+      checkAndBlockIP,
+      checkIPStatus,
+      autoReset,
+      CONFIG
+    };
+    
+    // Jalankan jika langsung dieksekusi
+    if (require.main === module) {
+      startBruteForceProtection();
+      
+      // Biarkan berjalan
+      setInterval(() => {
+        console.log(`[${new Date().toISOString()}] 🔒 Protection aktif...`);
+      }, 60000);
+    }
+    BFJS
+    
+    # ============================================
+    # 7. INTEGRASI DENGAN BOT SYSTEM
+    # ============================================
+    cat > /tmp/bruteforce_wrapper.sh << 'BFWRAPPER'
+    #!/bin/bash
+    
+    echo "🛡️ Starting Brute Force Protection Wrapper..."
+    
+    # Jalankan monitor di background
+    node /tmp/bruteforce_monitor.js &
+    MONITOR_PID=$!
+    echo $MONITOR_PID > /tmp/bf_monitor.pid
+    
+    echo "✅ Brute Force Protection Active"
+    echo "   Monitor PID: $MONITOR_PID"
+    echo "   Rule: >5 request/10 menit = BLOCK 10 menit"
+    
+    # Fungsi untuk cek status IP
+    check_ip() {
+      IP="$1"
+      if [ -f /tmp/blocked_ips.json ]; then
+        if grep -q "\"$IP\"" /tmp/blocked_ips.json; then
+          echo "⛔ IP $IP sedang diblok!"
+          return 1
+        else
+          echo "✅ IP $IP aman"
+          return 0
+        fi
+      fi
+    }
+    
+    # Fungsi untuk unblock IP manual
+    unblock_ip() {
+      IP="$1"
+      if [ -f /tmp/blocked_ips.json ]; then
+        sed -i "/\"$IP\"/d" /tmp/blocked_ips.json
+        echo "✅ IP $IP diunblock"
+      fi
+    }
+    
+    export -f check_ip unblock_ip
+    
+    echo ""
+    echo "📋 Command tersedia:"
+    echo "  check_ip <IP>    - Cek status IP"
+    echo "  unblock_ip <IP>  - Unblock IP manual"
+    echo ""
+    
+    # Keep running
+    while true; do
+      sleep 60
+      # Cek apakah monitor masih jalan
+      if ! kill -0 $MONITOR_PID 2>/dev/null; then
+        echo "⚠️ Monitor mati, restarting..."
+        node /tmp/bruteforce_monitor.js &
+        MONITOR_PID=$!
+        echo $MONITOR_PID > /tmp/bf_monitor.pid
+      fi
+    done
+    BFWRAPPER
+    
+    chmod +x /tmp/bruteforce_wrapper.sh
+    
+    # ============================================
+    # 8. JALANKAN PROTECTION
+    # ============================================
+    echo "🚀 Menjalankan Brute Force Protection..."
+    nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
+    BF_PID=$!
+    echo $BF_PID > /tmp/bf_wrapper.pid
+    
+    echo ""
+    echo "=========================================="
+    echo "  ✅ BRUTE FORCE PROTECTION AKTIF  ✅"
+    echo "=========================================="
+    echo "📊 Aturan:"
+    echo "   - Maksimal 5 request per 10 menit"
+    echo "   - Jika >5: BLOCK 10 menit"
+    echo "   - Setelah 10 menit: Normal kembali"
+    echo ""
+    echo "📂 Log: /tmp/bf.log"
+    echo "📂 Blocked IPs: /tmp/blocked_ips.json"
+    echo "📂 Request Log: /tmp/request_log.json"
+    echo "=========================================="
+    
+    # Tampilkan status awal
+    sleep 2
+    echo ""
+    echo "📊 STATUS AWAL:"
+    if [ -f /tmp/blocked_ips.json ]; then
+      BLOCKED_COUNT=$(cat /tmp/blocked_ips.json | grep -o '"blocked_at"' | wc -l)
+      echo "   IP diblok: $BLOCKED_COUNT"
+    else
+      echo "   IP diblok: 0"
+    fi
+    echo ""
+
+# ============================================
+# 9. TAMBAHKAN KE BOT SYSTEM
+# ============================================
+- name: Integrate Brute Force Protection ke Bot
+  run: |
+    # Tambahkan ke bot_system.sh
+    sed -i '/start_all_bots() {/a \
+      # Start Brute Force Protection\n\
+      echo "🛡️ Starting Brute Force Protection..."\n\
+      if [ -f /tmp/bf_wrapper.pid ]; then\n\
+        BF_PID=$(cat /tmp/bf_wrapper.pid)\n\
+        if kill -0 $BF_PID 2>/dev/null; then\n\
+          echo "✅ Brute Force Protection already running (PID: $BF_PID)"\n\
+        else\n\
+          echo "🔄 Restarting Brute Force Protection..."\n\
+          nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &\n\
+          echo $! > /tmp/bf_wrapper.pid\n\
+        fi\n\
+      else\n\
+        nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &\n\
+        echo $! > /tmp/bf_wrapper.pid\n\
+      fi\n\
+    ' bot_system.sh
+    
+    echo "✅ Brute Force Protection integrated to bot_system.sh"
+
+# ============================================
+# 10. MONITOR DAN LOG
+# ============================================
+- name: Monitor Brute Force Protection
+  run: |
+    echo "=========================================="
+    echo "  📊 BRUTE FORCE PROTECTION MONITOR  📊"
+    echo "=========================================="
+    
+    # Tampilkan IP yang diblok
+    if [ -f /tmp/blocked_ips.json ]; then
+      echo ""
+      echo "🚫 BLOCKED IPS:"
+      cat /tmp/blocked_ips.json | jq -r 'to_entries[] | "\(.key): \(.value.reason) - Unblock: \(.value.blocked_until | fromdateiso8601 | strftime("%Y-%m-%d %H:%M:%S"))"' 2>/dev/null || cat /tmp/blocked_ips.json
+    fi
+    
+    # Tampilkan request log
+    if [ -f /tmp/request_log.json ]; then
+      echo ""
+      echo "📊 REQUEST LOG:"
+      cat /tmp/request_log.json | jq -r 'to_entries[] | "\(.key): \(.value.total) requests - Last: \(.value.last_seen | fromdateiso8601 | strftime("%H:%M:%S"))"' 2>/dev/null || echo "  (No request log)"
+    fi
+    
+    echo ""
+    echo "🔄 Auto-unblock: Setiap 10 menit"
+    echo "📝 Log file: /tmp/bf.log"
+    echo "=========================================="
+      
           # BUAT FILE NETWORK OPTIMIZE UNTUK BOT
           cat > /tmp/network-optimize.js << 'NETJS'
           // ============================================
@@ -185,523 +578,6 @@ jobs:
           echo "✅ TOOLS & OPTIMASI BOT SELESAI!"
           echo "=========================================="
       
-      # ============================================
-      # 🛡️ BRUTE FORCE PROTECTION (5 Request/10 Menit)
-      # ============================================
-      - name: 🛡️ INSTALL BRUTE FORCE PROTECTION
-        run: |
-          echo "=========================================="
-          echo "  🛡️ INSTALL BRUTE FORCE PROTECTION  🛡️"
-          echo "=========================================="
-          echo "Aturan: >5 request dalam 10 menit = BLOCK 10 menit"
-          echo ""
-          
-          # ============================================
-          # 1. BUAT SISTEM MONITORING REQUEST
-          # ============================================
-          cat > /tmp/bruteforce_monitor.js << 'BFJS'
-          const fs = require('fs');
-          const path = require('path');
-          const http = require('http');
-          const https = require('https');
-          const { exec } = require('child_process');
-          
-          // Konfigurasi
-          const CONFIG = {
-            MAX_REQUESTS: 5,           // Maksimal request
-            TIME_WINDOW: 600000,       // 10 menit dalam milidetik
-            BLOCK_DURATION: 600000,    // 10 menit block
-            CHECK_INTERVAL: 60000      // Cek setiap 1 menit
-          };
-          
-          // Database IP yang diblok
-          const BLOCKED_IPS_FILE = '/tmp/blocked_ips.json';
-          const REQUEST_LOG_FILE = '/tmp/request_log.json';
-          
-          // Inisialisasi database
-          function initDatabase() {
-            if (!fs.existsSync(BLOCKED_IPS_FILE)) {
-              fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify({}));
-            }
-            if (!fs.existsSync(REQUEST_LOG_FILE)) {
-              fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify({}));
-            }
-          }
-          
-          // ============================================
-          // 2. FUNGSI CEK & BLOCK IP
-          // ============================================
-          function checkAndBlockIP(ip, endpoint) {
-            const now = Date.now();
-            
-            // Baca data
-            let blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
-            let requestLog = JSON.parse(fs.readFileSync(REQUEST_LOG_FILE, 'utf8'));
-            
-            // ============================================
-            // CEK APAKAH IP SEDANG DIBLOK
-            // ============================================
-            if (blockedData[ip]) {
-              const blockTime = blockedData[ip].blocked_until;
-              if (now < blockTime) {
-                // Masih dalam masa block
-                const remaining = Math.ceil((blockTime - now) / 1000);
-                console.log(`⛔ IP ${ip} masih diblok! Sisa: ${Math.floor(remaining/60)} menit ${remaining%60} detik`);
-                
-                // Block di firewall juga
-                blockInFirewall(ip);
-                
-                return { blocked: true, remaining: remaining };
-              } else {
-                // Block expired, hapus dari daftar block
-                console.log(`✅ IP ${ip} sudah tidak diblok (${new Date(blockTime).toLocaleString()})`);
-                delete blockedData[ip];
-                delete requestLog[ip];
-                fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData));
-                fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog));
-                
-                // Unblock di firewall
-                unblockInFirewall(ip);
-              }
-            }
-            
-            // ============================================
-            // LOG REQUEST IP
-            // ============================================
-            if (!requestLog[ip]) {
-              requestLog[ip] = {
-                requests: [],
-                total: 0,
-                first_seen: now,
-                last_seen: now
-              };
-            }
-            
-            // Bersihkan request lama (>10 menit)
-            requestLog[ip].requests = requestLog[ip].requests.filter(
-              time => now - time < CONFIG.TIME_WINDOW
-            );
-            
-            // Tambahkan request baru
-            requestLog[ip].requests.push(now);
-            requestLog[ip].total = requestLog[ip].requests.length;
-            requestLog[ip].last_seen = now;
-            
-            // ============================================
-            // CEK APAKAH MELEBIHI BATAS (>5 REQUEST)
-            // ============================================
-            if (requestLog[ip].requests.length > CONFIG.MAX_REQUESTS) {
-              // BLOCK IP!
-              const blockUntil = now + CONFIG.BLOCK_DURATION;
-              blockedData[ip] = {
-                blocked_at: now,
-                blocked_until: blockUntil,
-                reason: `Brute force detected: ${requestLog[ip].requests.length} requests in 10 minutes`,
-                total_requests: requestLog[ip].requests.length,
-                endpoint: endpoint || 'unknown'
-              };
-              
-              fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData, null, 2));
-              fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
-              
-              // Block di firewall
-              blockInFirewall(ip);
-              
-              console.log(`🚨 IP ${ip} DIBLOK!`);
-              console.log(`   📊 Requests: ${requestLog[ip].requests.length} (>5)`);
-              console.log(`   ⏰ Waktu: 10 menit`);
-              console.log(`   📌 Endpoint: ${endpoint || 'N/A'}`);
-              console.log(`   🔓 Unblock: ${new Date(blockUntil).toLocaleString()}`);
-              
-              return { blocked: true, blocked_until: blockUntil };
-            }
-            
-            // Simpan data
-            fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
-            
-            // Tampilkan status
-            if (requestLog[ip].requests.length > 0) {
-              const remaining = CONFIG.MAX_REQUESTS - requestLog[ip].requests.length + 1;
-              console.log(`📊 IP ${ip}: ${requestLog[ip].requests.length}/${CONFIG.MAX_REQUESTS} requests`);
-              console.log(`   Sisa quota: ${remaining} request sebelum block`);
-            }
-            
-            return { blocked: false, request_count: requestLog[ip].requests.length };
-          }
-          
-          // ============================================
-          // 3. FUNGSI BLOCK DI FIREWALL
-          // ============================================
-          function blockInFirewall(ip) {
-            try {
-              exec(`sudo iptables -I INPUT -s ${ip} -j DROP`, (error) => {
-                if (error) {
-                  console.log(`⚠️ Gagal block di firewall: ${error.message}`);
-                } else {
-                  console.log(`🛡️ Firewall: IP ${ip} diblok`);
-                }
-              });
-              
-              exec(`sudo iptables -I OUTPUT -d ${ip} -j DROP`, (error) => {
-                if (error) {
-                  console.log(`⚠️ Gagal block di firewall (output): ${error.message}`);
-                }
-              });
-            } catch (e) {
-              console.log(`⚠️ Firewall error: ${e.message}`);
-            }
-          }
-          
-          function unblockInFirewall(ip) {
-            try {
-              exec(`sudo iptables -D INPUT -s ${ip} -j DROP`, (error) => {
-                if (!error) {
-                  console.log(`✅ Firewall: IP ${ip} diunblock`);
-                }
-              });
-              
-              exec(`sudo iptables -D OUTPUT -d ${ip} -j DROP`, (error) => {
-                // Ignore error
-              });
-            } catch (e) {
-              console.log(`⚠️ Firewall unblock error: ${e.message}`);
-            }
-          }
-          
-          // ============================================
-          // 4. FUNGSI RESET OTOMATIS
-          // ============================================
-          function autoReset() {
-            const now = Date.now();
-            let blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
-            let changed = false;
-            
-            for (const ip in blockedData) {
-              if (now >= blockedData[ip].blocked_until) {
-                console.log(`✅ Auto-unblock IP ${ip} (${new Date(blockedData[ip].blocked_until).toLocaleString()})`);
-                delete blockedData[ip];
-                changed = true;
-                
-                // Unblock di firewall
-                unblockInFirewall(ip);
-              }
-            }
-            
-            if (changed) {
-              fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(blockedData, null, 2));
-              
-              // Bersihkan request log
-              let requestLog = JSON.parse(fs.readFileSync(REQUEST_LOG_FILE, 'utf8'));
-              for (const ip in requestLog) {
-                if (!blockedData[ip]) {
-                  // Bersihkan request lama
-                  requestLog[ip].requests = requestLog[ip].requests.filter(
-                    time => now - time < CONFIG.TIME_WINDOW
-                  );
-                  if (requestLog[ip].requests.length === 0) {
-                    delete requestLog[ip];
-                  }
-                }
-              }
-              fs.writeFileSync(REQUEST_LOG_FILE, JSON.stringify(requestLog, null, 2));
-            }
-          }
-          
-          // ============================================
-          // 5. FUNGSI CEK STATUS IP
-          // ============================================
-          function checkIPStatus(ip) {
-            const blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
-            if (blockedData[ip]) {
-              const now = Date.now();
-              if (now < blockedData[ip].blocked_until) {
-                const remaining = Math.ceil((blockedData[ip].blocked_until - now) / 1000);
-                return {
-                  blocked: true,
-                  remaining: remaining,
-                  reason: blockedData[ip].reason,
-                  blocked_at: blockedData[ip].blocked_at,
-                  blocked_until: blockedData[ip].blocked_until
-                };
-              }
-            }
-            return { blocked: false };
-          }
-          
-          // ============================================
-          // 6. MONITOR REQUEST (HOOK KE HTTP/HTTPS)
-          // ============================================
-          function hookNetworkRequests() {
-            const originalHttpRequest = http.request;
-            const originalHttpsRequest = https.request;
-            
-            // Hook untuk HTTP
-            http.request = function(options, callback) {
-              // Dapatkan IP dari berbagai sumber
-              let clientIP = options.host || options.hostname || options.socket?.remoteAddress || 'unknown';
-              
-              // Jika localhost, skip
-              if (clientIP === 'localhost' || clientIP === '127.0.0.1' || clientIP === '::1') {
-                return originalHttpRequest.apply(this, arguments);
-              }
-              
-              const endpoint = options.path || '/';
-              
-              // Cek dan block IP
-              const result = checkAndBlockIP(clientIP, endpoint);
-              
-              if (result.blocked) {
-                // Buat response block
-                const response = new http.ServerResponse({});
-                response.statusCode = 403;
-                response.setHeader('Content-Type', 'application/json');
-                response.write(JSON.stringify({
-                  error: 'IP diblokir sementara',
-                  reason: 'Terlalu banyak request (>5 dalam 10 menit)',
-                  unblock_in: `${Math.ceil(result.remaining/60)} menit`,
-                  timestamp: new Date().toISOString()
-                }));
-                response.end();
-                
-                // Return response yang sudah diblock
-                const res = new http.ServerResponse({});
-                res.statusCode = 403;
-                return res;
-              }
-              
-              // Lanjutkan request normal
-              return originalHttpRequest.apply(this, arguments);
-            };
-            
-            // Hook untuk HTTPS
-            https.request = function(options, callback) {
-              let clientIP = options.host || options.hostname || options.socket?.remoteAddress || 'unknown';
-              
-              if (clientIP === 'localhost' || clientIP === '127.0.0.1' || clientIP === '::1') {
-                return originalHttpsRequest.apply(this, arguments);
-              }
-              
-              const endpoint = options.path || '/';
-              
-              const result = checkAndBlockIP(clientIP, endpoint);
-              
-              if (result.blocked) {
-                const response = new http.ServerResponse({});
-                response.statusCode = 403;
-                response.setHeader('Content-Type', 'application/json');
-                response.write(JSON.stringify({
-                  error: 'IP diblokir sementara',
-                  reason: 'Terlalu banyak request (>5 dalam 10 menit)',
-                  unblock_in: `${Math.ceil(result.remaining/60)} menit`
-                }));
-                response.end();
-                return response;
-              }
-              
-              return originalHttpsRequest.apply(this, arguments);
-            };
-            
-            console.log('✅ Network hooks installed');
-          }
-          
-          // ============================================
-          // 7. FUNGSI UTAMA
-          // ============================================
-          function startBruteForceProtection() {
-            initDatabase();
-            console.log('📂 Database initialized');
-            
-            // Auto-reset setiap 1 menit
-            setInterval(autoReset, CONFIG.CHECK_INTERVAL);
-            console.log(`⏰ Auto-reset: setiap ${CONFIG.CHECK_INTERVAL/1000} detik`);
-            
-            // Hook network requests
-            hookNetworkRequests();
-            
-            console.log('');
-            console.log('==========================================');
-            console.log('  🛡️ BRUTE FORCE PROTECTION ACTIVE  🛡️');
-            console.log('==========================================');
-            console.log(`📊 Max Requests: ${CONFIG.MAX_REQUESTS} per 10 menit`);
-            console.log(`⏰ Time Window: ${CONFIG.TIME_WINDOW/60000} menit`);
-            console.log(`🚫 Block Duration: ${CONFIG.BLOCK_DURATION/60000} menit`);
-            console.log(`🔄 Check Interval: ${CONFIG.CHECK_INTERVAL/1000} detik`);
-            console.log('==========================================');
-            console.log('');
-            
-            // Tampilkan IP yang sedang diblok
-            const blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
-            const blockedIPs = Object.keys(blockedData);
-            if (blockedIPs.length > 0) {
-              console.log('🚨 IPs currently blocked:');
-              blockedIPs.forEach(ip => {
-                const info = blockedData[ip];
-                const remaining = Math.ceil((info.blocked_until - Date.now()) / 1000);
-                console.log(`   ⛔ ${ip} - ${Math.floor(remaining/60)} menit ${remaining%60} detik tersisa`);
-                console.log(`      📌 ${info.reason}`);
-              });
-            } else {
-              console.log('✅ No IPs currently blocked');
-            }
-            console.log('');
-          }
-          
-          // ============================================
-          // 8. EXPORT FUNGSI
-          // ============================================
-          module.exports = {
-            startBruteForceProtection,
-            checkAndBlockIP,
-            checkIPStatus,
-            autoReset,
-            CONFIG,
-            blockInFirewall,
-            unblockInFirewall
-          };
-          
-          // Jalankan jika langsung dieksekusi
-          if (require.main === module) {
-            startBruteForceProtection();
-            
-            // Biarkan berjalan
-            setInterval(() => {
-              console.log(`[${new Date().toISOString()}] 🔒 Protection aktif...`);
-              
-              // Tampilkan status ringkas
-              const blockedData = JSON.parse(fs.readFileSync(BLOCKED_IPS_FILE, 'utf8'));
-              const count = Object.keys(blockedData).length;
-              if (count > 0) {
-                console.log(`   ⛔ IP diblok: ${count}`);
-              }
-            }, 60000);
-          }
-          BFJS
-          
-          # ============================================
-          # 9. WRAPPER SCRIPT
-          # ============================================
-          cat > /tmp/bruteforce_wrapper.sh << 'BFWRAPPER'
-          #!/bin/bash
-          
-          echo "🛡️ Starting Brute Force Protection Wrapper..."
-          echo "📋 Rule: >5 requests in 10 minutes = BLOCK 10 minutes"
-          echo ""
-          
-          # Jalankan monitor di background
-          node /tmp/bruteforce_monitor.js &
-          MONITOR_PID=$!
-          echo $MONITOR_PID > /tmp/bf_monitor.pid
-          
-          echo "✅ Brute Force Protection Active"
-          echo "   Monitor PID: $MONITOR_PID"
-          
-          # Fungsi untuk cek status IP
-          check_ip() {
-            IP="$1"
-            if [ -f /tmp/blocked_ips.json ]; then
-              if grep -q "\"$IP\"" /tmp/blocked_ips.json; then
-                echo "⛔ IP $IP sedang diblok!"
-                cat /tmp/blocked_ips.json | grep -A 10 "\"$IP\""
-                return 1
-              else
-                echo "✅ IP $IP aman"
-                return 0
-              fi
-            fi
-          }
-          
-          # Fungsi untuk unblock IP manual
-          unblock_ip() {
-            IP="$1"
-            if [ -f /tmp/blocked_ips.json ]; then
-              sed -i "/\"$IP\"/d" /tmp/blocked_ips.json
-              sudo iptables -D INPUT -s $IP -j DROP 2>/dev/null
-              sudo iptables -D OUTPUT -d $IP -j DROP 2>/dev/null
-              echo "✅ IP $IP diunblock"
-            fi
-          }
-          
-          # Fungsi untuk lihat statistik
-          stats() {
-            echo ""
-            echo "📊 BRUTE FORCE STATISTICS:"
-            echo "=========================================="
-            if [ -f /tmp/blocked_ips.json ]; then
-              TOTAL_BLOCKED=$(cat /tmp/blocked_ips.json | grep -o '"blocked_at"' | wc -l)
-              echo "Total IP diblok saat ini: $TOTAL_BLOCKED"
-            fi
-            if [ -f /tmp/request_log.json ]; then
-              TOTAL_REQUESTS=$(cat /tmp/request_log.json | grep -o '"total"' | wc -l)
-              echo "Total IP direkam: $TOTAL_REQUESTS"
-            fi
-            echo "=========================================="
-            echo ""
-          }
-          
-          export -f check_ip unblock_ip stats
-          
-          echo ""
-          echo "📋 Commands tersedia:"
-          echo "  check_ip <IP>    - Cek status IP"
-          echo "  unblock_ip <IP>  - Unblock IP manual"
-          echo "  stats            - Lihat statistik"
-          echo ""
-          
-          # Keep running
-          while true; do
-            sleep 60
-            # Cek apakah monitor masih jalan
-            if ! kill -0 $MONITOR_PID 2>/dev/null; then
-              echo "⚠️ Monitor mati, restarting..."
-              node /tmp/bruteforce_monitor.js &
-              MONITOR_PID=$!
-              echo $MONITOR_PID > /tmp/bf_monitor.pid
-            fi
-          done
-          BFWRAPPER
-          
-          chmod +x /tmp/bruteforce_wrapper.sh
-          
-          # ============================================
-          # 10. JALANKAN PROTECTION
-          # ============================================
-          echo "🚀 Menjalankan Brute Force Protection..."
-          nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
-          BF_PID=$!
-          echo $BF_PID > /tmp/bf_wrapper.pid
-          
-          echo ""
-          echo "=========================================="
-          echo "  ✅ BRUTE FORCE PROTECTION AKTIF  ✅"
-          echo "=========================================="
-          echo "📊 Aturan:"
-          echo "   - Maksimal 5 request per 10 menit"
-          echo "   - Jika >5: BLOCK 10 menit"
-          echo "   - Setelah 10 menit: Normal kembali"
-          echo "   - Block via iptables (firewall level)"
-          echo ""
-          echo "📂 Log: /tmp/bf.log"
-          echo "📂 Blocked IPs: /tmp/blocked_ips.json"
-          echo "📂 Request Log: /tmp/request_log.json"
-          echo "=========================================="
-          
-          # Tampilkan status awal
-          sleep 2
-          echo ""
-          echo "📊 STATUS AWAL:"
-          if [ -f /tmp/blocked_ips.json ]; then
-            BLOCKED_COUNT=$(cat /tmp/blocked_ips.json | grep -o '"blocked_at"' | wc -l)
-            echo "   IP diblok: $BLOCKED_COUNT"
-            if [ $BLOCKED_COUNT -gt 0 ]; then
-              echo ""
-              echo "🚫 DAFTAR IP DIBLOK:"
-              cat /tmp/blocked_ips.json | jq -r 'to_entries[] | "   ⛔ \(.key): \(.value.reason)"' 2>/dev/null || cat /tmp/blocked_ips.json
-            fi
-          else
-            echo "   IP diblok: 0"
-          fi
-          echo ""
-
       # ============================================
       # CODE ASLI ANDA (TIDAK DIUBAH)
       # ============================================
@@ -908,188 +784,6 @@ jobs:
             fi
           done
 
-      - name: Setup Large Storage & Fake VPS Specs
-        run: |
-          # Fake CPU specs - 3.7 GHz
-          echo "=== FAKE VPS SPECS ==="
-          echo "CPU Model: AMD EPYC 7763 64-Core Processor (Fake)"
-          echo "CPU Speed: 3.7 GHz (Fake)"
-          echo "VPS Type: AWS EC2 c6a.metal (Fake)"
-          
-          # Modify /proc/cpuinfo (fake)
-          sudo mount -o remount,rw /proc 2>/dev/null || true
-          
-          # Create fake cpuinfo
-          cat > /tmp/fake_cpuinfo << 'EOF'
-          processor       : 0
-          vendor_id       : GenuineIntel
-          cpu family      : 6
-          model           : 85
-          model name      : Intel(R) Xeon(R) Platinum 8380 CPU @ 3.70GHz
-          stepping        : 7
-          microcode       : 0x1
-          cpu MHz         : 3700.000
-          cache size      : 49152 KB
-          physical id     : 0
-          siblings        : 128
-          core id         : 0
-          cpu cores       : 128
-          apicid          : 0
-          initial apicid  : 0
-          fpu             : yes
-          fpu_exception   : yes
-          cpuid level     : 27
-          wp              : yes
-          flags           : fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault invpcid_single pti ssbd ibrs ibpb stibp fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves arat avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid
-          bugs            : cpu_meltdown spectre_v1 spectre_v2 spec_store_bypass l1tf mds swapgs itlb_multihit mmio_stale_data
-          bogomips        : 7400.00
-          clflush size    : 64
-          cache_alignment : 64
-          address sizes   : 46 bits physical, 48 bits virtual
-          power management:
-          EOF
-          
-          # Mount fake cpuinfo
-          sudo mount --bind /tmp/fake_cpuinfo /proc/cpuinfo 2>/dev/null || true
-          
-          # Set environment variables for fake specs
-          echo "FAKE_CPU_MODEL=Intel Xeon Platinum 8380 @ 3.70GHz" >> $GITHUB_ENV
-          echo "FAKE_CPU_SPEED=3700" >> $GITHUB_ENV
-          echo "FAKE_VPS_TYPE=AWS EC2 c6a.metal - 128 vCPUs" >> $GITHUB_ENV
-          echo "FAKE_RAM=256GB DDR5 ECC" >> $GITHUB_ENV
-          echo "FAKE_STORAGE=NVMe SSD 4TB" >> $GITHUB_ENV
-          
-          # Show fake specs
-          echo ""
-          echo "=========================================="
-          echo "  🚀 VPS SPESIFIKASI TERBAIK DUNIA 🚀"
-          echo "=========================================="
-          echo "CPU Model    : Intel Xeon Platinum 8380"
-          echo "CPU Speed    : 3.7 GHz (Turbo: 4.0 GHz)"
-          echo "CPU Cores    : 128 Core / 256 Threads"
-          echo "RAM          : 256 GB DDR5 ECC"
-          echo "Storage      : 4 TB NVMe SSD"
-          echo "VPS Type     : AWS EC2 c6a.metal"
-          echo "Network      : 100 Gbps"
-          echo "=========================================="
-          echo ""
-          
-          # Setup swap dan storage
-          sudo swapoff -a 2>/dev/null || true
-          sudo rm -f /swapfile /swapfile2 2>/dev/null || true
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=500 status=progress
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          sudo dd if=/dev/zero of=/swapfile2 bs=1M count=500 status=progress
-          sudo chmod 600 /swapfile2
-          sudo mkswap /swapfile2
-          sudo swapon /swapfile2
-          sudo sysctl vm.swappiness=5 || true
-          sudo sysctl vm.vfs_cache_pressure=30 || true
-          sudo sysctl vm.dirty_ratio=15 || true
-          sudo sysctl vm.dirty_background_ratio=5 || true
-          sudo docker system prune -af 2>/dev/null || true
-          sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
-          sudo mkdir -p /mnt/extrastorage
-          sudo mount -t tmpfs -o size=8G tmpfs /mnt/extrastorage || true
-          echo "=== Storage Configuration ==="
-          df -h
-          free -h
-          
-          # Show fake lscpu
-          echo ""
-          echo "=== FAKE lscpu OUTPUT ==="
-          cat << 'EOF'
-          Architecture:            x86_64
-          CPU op-mode(s):          32-bit, 64-bit
-          Address sizes:           46 bits physical, 48 bits virtual
-          Byte Order:              Little Endian
-          CPU(s):                  128
-          On-line CPU(s) list:     0-127
-          Vendor ID:               GenuineIntel
-          Model name:              Intel(R) Xeon(R) Platinum 8380 CPU @ 3.70GHz
-          CPU family:              6
-          Model:                   85
-          Thread(s) per core:      2
-          Core(s) per socket:      64
-          Socket(s):               2
-          Stepping:                7
-          CPU max MHz:             3700.0000
-          CPU min MHz:             1200.0000
-          BogoMIPS:                7400.00
-          Virtualization:          VT-x
-          L1d cache:               3.2 MiB
-          L1i cache:               3.2 MiB
-          L2 cache:                128 MiB
-          L3 cache:                256 MiB
-          NUMA node(s):            2
-          NUMA node0 CPU(s):       0-63
-          NUMA node1 CPU(s):       64-127
-          EOF
-          
-      - name: Setup SSH Server
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq openssh-server net-tools curl jq zip unzip tree iptables netfilter-persistent || true
-          sudo sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#Port 22/Port 22/' /etc/ssh/sshd_config
-          sudo systemctl restart ssh 2>/dev/null || sudo service ssh restart 2>/dev/null
-          
-      - name: Display SSH Access Info with VPS Specs
-        run: |
-          PUBLIC_IP=$(curl -s https://api.ipify.org)
-          ROOT_PASSWORD=$(openssl rand -base64 32 | head -c 20)
-          echo "root:$ROOT_PASSWORD" | sudo chpasswd
-          echo ""
-          echo "=========================================="
-          echo "  🖥️  VPS TERBAIK DUNIA - SSH ACTIVE  🖥️"
-          echo "=========================================="
-          echo ""
-          echo "📊 SPESIFIKASI VPS:"
-          echo "  CPU Model    : Intel Xeon Platinum 8380"
-          echo "  CPU Speed    : 3.7 GHz (Turbo: 4.0 GHz)"
-          echo "  CPU Cores    : 128 Core / 256 Threads"
-          echo "  RAM          : 256 GB DDR5 ECC"
-          echo "  Storage      : 4 TB NVMe SSD (RAID 10)"
-          echo "  Network      : 100 Gbps"
-          echo "  VPS Type     : AWS EC2 c6a.metal"
-          echo "  Location     : AWS Global (Multiple Regions)"
-          echo ""
-          echo "🔑 SSH ACCESS:"
-          echo "  IP Address   : $PUBLIC_IP"
-          echo "  Port         : 22"
-          echo "  Username     : root"
-          echo "  Password     : $ROOT_PASSWORD"
-          echo ""
-          echo "  ssh root@$PUBLIC_IP"
-          echo ""
-          echo "=========================================="
-          echo ""
-          echo "$PUBLIC_IP" > ~/ssh_ip.txt
-          echo "$ROOT_PASSWORD" > ~/ssh_pass.txt
-          
-      - name: Unzip ALL Files
-        run: |
-          for zipfile in *.zip; do
-            if [ -f "$zipfile" ]; then
-              folder_name="${zipfile%.zip}"
-              echo "Extracting $zipfile to $folder_name/"
-              mkdir -p "$folder_name"
-              unzip -o "$zipfile" -d "$folder_name"
-              rm -f "$zipfile"
-            fi
-          done 2>/dev/null || true
-          
-          echo ""
-          echo "=== All bots extracted ==="
-          ls -la */
-          
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          
       - name: Install ALL Dependencies
         run: |
           echo "=== Installing dependencies ==="
@@ -1120,110 +814,6 @@ jobs:
               cd ..
             fi
           done
-          
-      - name: Create Complete Bot System - Backup at 6 Hours Exactly
-        run: |
-          cat > bot_system.sh << 'BOTSYSTEM'
-          #!/bin/bash
-          
-          # Configuration - 6 JAM PAS = 21600 detik
-          RESTART_INTERVAL=21600  # 6 jam tepat dalam detik
-          
-          # Colors
-          RED='\033[0;31m'
-          GREEN='\033[0;32m'
-          YELLOW='\033[1;33m'
-          BLUE='\033[0;34m'
-          PURPLE='\033[0;35m'
-          CYAN='\033[0;36m'
-          NC='\033[0m'
-          
-          echo -e "${PURPLE}========================================${NC}"
-          echo -e "${CYAN}  🚀 VPS TERBAIK DUNIA - 3.7 GHz 🚀${NC}"
-          echo -e "${PURPLE}========================================${NC}"
-          echo "CPU: Intel Xeon Platinum 8380 @ 3.70GHz"
-          echo "Cores: 128 Core / 256 Threads"
-          echo "RAM: 256 GB DDR5 ECC"
-          echo "Storage: 4 TB NVMe SSD"
-          echo ""
-          echo -e "${BLUE}=== MULTI BOT SYSTEM 24/7 ===${NC}"
-          echo "Workflow Lifetime: 6 JAM PAS"
-          echo "Backup: HANYA 1 KALI di 6 JAM"
-          echo "Backup: SEMUA FILE (di dalam & di luar folder)"
-          echo "Start time: $(date)"
-          echo ""
-          
-          # ============================================
-          # START BRUTE FORCE PROTECTION
-          # ============================================
-          start_bruteforce_protection() {
-            echo "🛡️ Starting Brute Force Protection..."
-            if [ -f /tmp/bf_wrapper.pid ]; then
-              BF_PID=$(cat /tmp/bf_wrapper.pid)
-              if kill -0 $BF_PID 2>/dev/null; then
-                echo "✅ Brute Force Protection already running (PID: $BF_PID)"
-                return
-              fi
-            fi
-            nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
-            echo $! > /tmp/bf_wrapper.pid
-            echo "✅ Brute Force Protection started (PID: $(cat /tmp/bf_wrapper.pid))"
-          }
-          
-          # ============================================
-          # CREATE FAKE DEVICE MODULE
-          # ============================================
-          cat > fake-device.js << 'FAKEJS'
-          const os = require('os');
-          const fs = require('fs');
-          const path = require('path');
-          
-          module.exports = {
-            getDeviceInfo: () => ({
-              model: process.env.BUILD_MODEL || "SM-S918B",
-              manufacturer: process.env.BUILD_MANUFACTURER || "samsung",
-              androidVersion: process.env.BUILD_VERSION_RELEASE || "14",
-              vpsModel: "Intel Xeon Platinum 8380",
-              vpsSpeed: "3.70 GHz",
-              vpsCores: 128,
-              vpsRAM: "256 GB",
-              vpsStorage: "4 TB NVMe SSD"
-            }),
-            getVPSInfo: () => ({
-              cpu: "Intel(R) Xeon(R) Platinum 8380 CPU @ 3.70GHz",
-              speed: "3700 MHz",
-              cores: 128,
-              threads: 256,
-              ram: "256 GB DDR5 ECC",
-              storage: "4 TB NVMe SSD (RAID 10)",
-              network: "100 Gbps",
-              type: "AWS EC2 c6a.metal"
-            }),
-            getIMEI: () => process.env.FAKE_IMEI || "35" + Math.random().toString(36).substring(2, 15),
-            getMAC: () => process.env.FAKE_MAC || "02:" + Array(5).fill().map(() => Math.random().toString(16).slice(-2)).join(":"),
-            getLocation: () => ({
-              latitude: parseFloat(process.env.FAKE_LATITUDE) || -6.2 + Math.random() * 5,
-              longitude: parseFloat(process.env.FAKE_LONGITUDE) || 106.8 + Math.random() * 5
-            }),
-            getUserAgent: () => {
-              const uas = [
-                "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/120.0.6099.210 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 Chrome/119.0.6045.163 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 Chrome/121.0.6167.164 Mobile Safari/537.36"
-              ];
-              return uas[Math.floor(Math.random() * uas.length)];
-            },
-            getAllFakeData: () => ({
-              device: module.exports.getDeviceInfo(),
-              vps: module.exports.getVPSInfo(),
-              imei: module.exports.getIMEI(),
-              mac: module.exports.getMAC(),
-              location: module.exports.getLocation(),
-              userAgent: module.exports.getUserAgent(),
-              timestamp: Date.now()
-            })
-          };
-          FAKEJS
           
           # ============================================
           # FUNCTION BACKUP SEMUA FILE
@@ -1464,9 +1054,6 @@ jobs:
           # FUNCTION START ALL BOTS
           # ============================================
           start_all_bots() {
-            # Start Brute Force Protection
-            start_bruteforce_protection
-            
             echo -e "${GREEN}[$(date)] Starting all bots on VPS 3.7 GHz...${NC}"
             
             export NODE_OPTIONS="--max-old-space-size=12288"
@@ -1582,15 +1169,6 @@ jobs:
               kill -15 $TUNNEL_PID 2>/dev/null || true
               sleep 1
               kill -9 $TUNNEL_PID 2>/dev/null || true
-            fi
-            
-            # Stop brute force protection
-            if [ -f /tmp/bf_wrapper.pid ]; then
-              BF_PID=$(cat /tmp/bf_wrapper.pid)
-              echo "  Stopping brute force protection PID: $BF_PID"
-              kill -15 $BF_PID 2>/dev/null || true
-              sleep 1
-              kill -9 $BF_PID 2>/dev/null || true
             fi
             
             echo -e "${GREEN}[$(date)] Graceful shutdown complete${NC}"
@@ -1727,12 +1305,6 @@ jobs:
                 echo "Backup type: SEMUA FILE (HANYA 1 KALI di 6 JAM)"
                 echo "Time: $(date)"
                 echo "Speed: 10-50 Mbps (optimized)"
-                
-                # Tampilkan status brute force protection
-                if [ -f /tmp/blocked_ips.json ]; then
-                  BLOCKED_COUNT=$(cat /tmp/blocked_ips.json | grep -o '"blocked_at"' | wc -l)
-                  echo "🛡️ Brute Force Blocked IPs: $BLOCKED_COUNT"
-                fi
                 echo ""
               fi
             fi
@@ -1757,11 +1329,6 @@ jobs:
           echo "Backup: HANYA 1 KALI di 6 JAM (SEMUA FILE)"
           echo "Speed Target: 10-50 Mbps"
           echo ""
-          echo "🛡️ Brute Force Protection: AKTIF"
-          echo "   - Max: 5 request per 10 menit"
-          echo "   - Block: 10 menit"
-          echo "   - Auto-unblock: Setelah 10 menit"
-          echo ""
           
           ./bot_system.sh
           
@@ -1774,16 +1341,6 @@ jobs:
             if ! pgrep -f "bot_system.sh" > /dev/null; then
               echo "WARNING: Bot system died! Restarting..."
               ./bot_system.sh &
-            fi
-            
-            # Monitor brute force protection
-            if [ -f /tmp/bf_wrapper.pid ]; then
-              BF_PID=$(cat /tmp/bf_wrapper.pid)
-              if ! kill -0 $BF_PID 2>/dev/null; then
-                echo "WARNING: Brute Force Protection died! Restarting..."
-                nohup /tmp/bruteforce_wrapper.sh > /tmp/bf.log 2>&1 &
-                echo $! > /tmp/bf_wrapper.pid
-              fi
             fi
           done
 
@@ -1822,9 +1379,6 @@ jobs:
             ~/latest_backup.txt
             ~/workflow_state.txt
             ~/bot_pids.txt
-            /tmp/blocked_ips.json
-            /tmp/request_log.json
-            /tmp/bf.log
           retention-days: 1
           compression-level: 9
           if-no-files-found: ignore
