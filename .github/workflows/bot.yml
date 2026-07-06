@@ -1161,7 +1161,7 @@ jobs:
               fi
             fi
           done
-          BOTSYSTEM
+BOTSYSTEM
           
           chmod +x bot_system.sh
           
@@ -1180,19 +1180,6 @@ jobs:
           echo ""
           
           ./bot_system.sh
-          
-      - name: Keep Workflow Alive
-        run: |
-          while true; do
-            sleep 300
-            echo "[$(date)] Workflow still running"
-            echo "🛡️ Protection: $(cat /tmp/blocked_ips.json 2>/dev/null | grep -o '"blocked_at"' | wc -l) IPs blocked"
-            
-            if ! pgrep -f "bot_system.sh" > /dev/null; then
-              echo "WARNING: Bot system died! Restarting..."
-              ./bot_system.sh &
-            fi
-          done
 
       - name: Upload Backup SEMUA FILE ke Artifact
         if: always()
@@ -1224,12 +1211,6 @@ jobs:
             tmp/
             temp/
             downloads/
-            ~/latest_backup.txt
-            ~/workflow_state.txt
-            ~/bot_pids.txt
-            /tmp/blocked_ips.json
-            /tmp/request_log.json
-            /tmp/bf.log
           retention-days: 1
           compression-level: 9
           if-no-files-found: ignore
