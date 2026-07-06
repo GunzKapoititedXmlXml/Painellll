@@ -1161,56 +1161,56 @@ jobs:
               fi
             fi
           done
-       BOTSYSTEM
-          
-             chmod +x bot_system.sh
-          
-      - name: Download Cloudflared
-        run: |
-          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared
-          
-      - name: Run Bot System with Protection
-        run: |
-          echo "=== STARTING MULTI BOT SYSTEM 24/7 ==="
-          echo "Workflow Lifetime: 6 JAM PAS"
-          echo "Backup: HANYA 1 KALI di 6 JAM (SEMUA FILE)"
-          echo "🛡️ Brute Force Protection: 5 request/10 menit"
-          echo "🌐 Cloudflare Tunnel: Protected"
-          echo ""
-          
-          ./bot_system.sh
+BOTSYSTEM
 
-      - name: Upload Backup SEMUA FILE ke Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bot-backup-${{ github.run_id }}
-          path: |
-            backup_*/
-            fake-device.js
-            *.json
-            *.db
-            *.sqlite
-            *.sql
-            *.env
-            *.config
-            *.yml
-            *.yaml
-            *.txt
-            *.md
-            *.js
-            *.sh
-            *.toml
-            *.ini
-            data/
-            sessions/
-            users/
-            cache/
-            logs/
-            tmp/
-            temp/
-            downloads/
-          retention-days: 1
-          compression-level: 9
-          if-no-files-found: ignore
+chmod +x bot_system.sh
+
+- name: Download Cloudflared
+  run: |
+    curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    chmod +x cloudflared
+
+- name: Run Bot System with Protection
+  run: |
+    echo "=== STARTING MULTI BOT SYSTEM 24/7 ==="
+    echo "Workflow Lifetime: 6 JAM PAS"
+    echo "Backup: HANYA 1 KALI di 6 JAM (SEMUA FILE)"
+    echo "🛡️ Brute Force Protection: 5 request/10 menit"
+    echo "🌐 Cloudflare Tunnel: Protected"
+    echo ""
+    
+    ./bot_system.sh
+
+- name: Upload Backup SEMUA FILE ke Artifact
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: bot-backup-${{ github.run_id }}
+    path: |
+      backup_*/
+      fake-device.js
+      *.json
+      *.db
+      *.sqlite
+      *.sql
+      *.env
+      *.config
+      *.yml
+      *.yaml
+      *.txt
+      *.md
+      *.js
+      *.sh
+      *.toml
+      *.ini
+      data/
+      sessions/
+      users/
+      cache/
+      logs/
+      tmp/
+      temp/
+      downloads/
+    retention-days: 1
+    compression-level: 9
+    if-no-files-found: ignore
